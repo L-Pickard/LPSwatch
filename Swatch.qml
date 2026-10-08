@@ -5,6 +5,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import "SwatchModel.js" as Model
 
 // Swatch: try the theme on. The candidate's wallpaper fills the screen, the
@@ -1005,8 +1006,8 @@ Item {
   // The cheap half of omarchy-theme-set (what `shell applyTheme` IPC does),
   // without the subprocess. Bar, menus, notifications, and this overlay follow.
   function applyPalette(colors, shellToml) {
-    Color.loadColors(colors || "")
-    Color.loadShell(shellToml || "")
+    Commons.Color.loadColors(colors || "")
+    Commons.Color.loadShell(shellToml || "")
     Style.scheduleRefresh()
   }
 
@@ -2460,7 +2461,7 @@ Item {
       visible: root.opened && !root.viewReady
       Rectangle {
         anchors.fill: parent
-        color: Util.alpha(Color.background, 0.22)
+        color: Util.alpha(Commons.Color.background, 0.22)
       }
       // Invisible picker controls must not receive clicks during preparation.
       MouseArea { anchors.fill: parent; onClicked: root.dismiss() }
@@ -2473,14 +2474,14 @@ Item {
         width: openingLabel.implicitWidth + root.sp(40)
         height: root.sp(44)
         radius: root.sp(8)
-        color: Color.background
-        border.color: Util.alpha(Color.accent, 0.5)
+        color: Commons.Color.background
+        border.color: Util.alpha(Commons.Color.accent, 0.5)
         border.width: 1
         Text {
           id: openingLabel
           anchors.centerIn: parent
           text: "Opening Swatch…"
-          color: Color.foreground
+          color: Commons.Color.foreground
           font.family: Style.fontFamily
           font.pixelSize: root.fz.body
         }

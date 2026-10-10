@@ -178,3 +178,25 @@ assert.equal(Model.formatBytes(900), '900 B')
 assert.equal(Model.formatBytes(1536), '1.5 KB')
 assert.equal(Model.formatBytes(140 * 1024 * 1024), '140 MB')
 assert.equal(Model.formatBytes(3.2 * 1024 * 1024 * 1024), '3.2 GB')
+
+// Pictures mode: a picture is a row in the target theme's colours.
+const pics = [
+  {path: '/p/Artvee/monet.jpg', rel: 'Artvee/monet.jpg', folder: 'Artvee', key: 'aaaaaaaaaaaaaaaa'},
+  {path: '/p/CityPop/night.png', rel: 'CityPop/night.png', folder: 'CityPop', key: 'bbbbbbbbbbbbbbbb'},
+  {path: '/p/loose.webp', rel: 'loose.webp', folder: '', key: 'cccccccccccccccc'}]
+const target = {...T[0], colorsToml: 'c', shellToml: 's'}
+const prow = Model.pictureRows(pics, target, '', '')
+assert.equal(prow.length, 3)
+assert.equal(prow[0].colors, target.colors)
+assert.deepEqual([prow[0].name, prow[0].caption, prow[0].picture], ['Artvee/monet.jpg', 'monet.jpg', '/p/Artvee/monet.jpg'])
+assert.equal(Model.keyAt(prow[1], 0), 'bbbbbbbbbbbbbbbb')
+assert.equal(Model.backgroundAt(prow[1], 0), '/p/CityPop/night.png')
+assert.equal(Model.hasVideo(prow[1], 0), false)
+assert.deepEqual(Model.pictureRows(pics, target, 'CityPop', '').map(r => r.caption), ['night.png'])
+assert.deepEqual(Model.pictureRows(pics, target, '', 'mon').map(r => r.caption), ['monet.jpg'])
+assert.deepEqual(Model.pictureRows(pics, target, 'CityPop', 'mon'), [])
+assert.deepEqual(Model.pictureRows(pics, null, '', ''), [])
+assert.equal(Model.nextFolder(['Artvee', 'CityPop'], ''), 'Artvee')
+assert.equal(Model.nextFolder(['Artvee', 'CityPop'], 'CityPop'), '')
+assert.equal(Model.nextFolder([], ''), '')
+assert.equal(Model.nextFolder(['Artvee'], 'gone'), '')

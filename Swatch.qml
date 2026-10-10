@@ -55,6 +55,23 @@ Item {
   // The box a theme's git URL is pasted into. It stays up while the theme
   // downloads, with the keyboard handed back so browsing carries on.
   property bool addingTheme: false
+  // Pictures mode: the strip shows ~/Pictures instead of themes, each picture
+  // full-screen under the chosen theme's colours (Model.pictureRows). Entered
+  // on request only; nothing about it runs when the picker opens.
+  property bool picturesMode: false
+  property var pictures: []
+  property var pictureFolders: []
+  property string pictureFolder: ""        // "" is all of them
+  property string picturesDir: ""
+  property var pictureKeys: ({})           // key -> true, for dirFor
+  property var pictureTheme: null          // the theme being added to
+  property string pictureReturnBg: ""
+  property string pictureLastAdded: ""
+  property var pictureAdded: ({})          // source path -> true, this visit
+  readonly property int pictureAddedCount: Object.keys(pictureAdded).length
+  // A picture's preview copies live in their own cache folder, apart from the
+  // themes' — thumbs.sh sweeps anything in its folder the theme index lacks.
+  function dirFor(key) { return key && pictureKeys[key] ? picturesDir : thumbsDir }
   property string installError: ""
   readonly property color dangerColor: selected ? selected.colors.red || "#e5484d" : "#e5484d"
   readonly property bool themeHidden: !!selected && isThemeHidden(selected.name)
@@ -346,6 +363,7 @@ Item {
     choosing = false
     addingTheme = false
     installError = ""
+    picturesMode = false
     readPreferences()
     readCollection()
     opened = true
@@ -780,6 +798,125 @@ Item {
     installProc.running = true
   }
 
+  // ---------------------------------------------------------------- pictures
+
+  Process {
+    id: picturesListProc
+    command: ["python3", root.scriptPath("pictures.py"), "list"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.loadPictures(text) }
+  }
+  Process {
+    id: picturesThumbProc
+    command: ["python3", root.scriptPath("pictures.py"), "thumbs"]
+    onExited: root.cacheGen += 1
+  }
+  Timer { running: picturesThumbProc.running; interval: 1500; repeat: true; onTriggered: root.cacheGen += 1 }
+  // Screen-size copies are made for the picture being looked at and its
+  // neighbours, not for the whole folder: they are about a megabyte each.
+  Process {
+    id: pictureStageProc
+    property string wanted: ""
+    onExited: { root.cacheGen += 1; root.stagePictures() }
+  }
+  Timer { id: pictureStageDelay; interval: 140; onTriggered: root.stagePictures() }
+
+  function stagePictures() {
+    if (!picturesMode || !opened || pictureStageProc.running) return
+    var paths = [], offsets = [0, 1, -1, 2, -2]
+    for (var i = 0; i < offsets.length; i++) {
+      var row = rows[selectedIndex + offsets[i]]
+      if (row && row.picture) paths.push(row.picture)
+    }
+    var wanted = paths.join("\n")
+    if (!paths.length || wanted === pictureStageProc.wanted) return
+    pictureStageProc.wanted = wanted
+    pictureStageProc.command = ["python3", scriptPath("pictures.py"), "stage", String(stageW), String(stageH)].concat(paths)
+    pictureStageProc.running = true
+  }
+
+  function loadPictures(text) {
+    var parsed = null
+    try { parsed = JSON.parse(text) } catch (e) { parsed = null }
+    if (!parsed || !Array.isArray(parsed.pictures)) {
+      if (picturesMode) curationMessage = "Could not look through ~/Pictures"
+      return
+    }
+    // Keys are only ever added: a slot still fading out a picture that has
+    // since left the folder must keep finding its copy.
+    var keys = Object.assign({}, pictureKeys)
+    for (var i = 0; i < parsed.pictures.length; i++) keys[parsed.pictures[i].key] = true
+    pictureKeys = keys
+    picturesDir = String(parsed.dir || "")
+    pictureFolders = parsed.folders || []
+    pictures = parsed.pictures
+    if (pictureFolders.indexOf(pictureFolder) === -1) pictureFolder = ""
+    if (!picturesThumbProc.running) picturesThumbProc.running = true
+    if (!picturesMode) return
+    curationMessage = pictures.length ? (parsed.truncated ? "Showing the first " + pictures.length + " pictures" : "") : ""
+    scrubQuick = true
+    rebuild(false)
+    pictureStageProc.wanted = ""
+    pictureStageDelay.restart()
+  }
+
+  function enterPictures() {
+    if (picturesMode || !selected) return
+    if (addingTheme) cancelAddTheme()
+    pictureTheme = Model.findByName(themes, selected.name) || selected
+    pictureReturnBg = selectedBackground
+    pictureLastAdded = ""
+    pictureAdded = ({})
+    pictureFolder = ""
+    searching = false
+    filterText = ""
+    pendingSelect = null
+    confirmEmpty = false
+    picturesMode = true
+    curationMessage = pictures.length ? "" : "Looking through ~/Pictures…"
+    if (!picturesListProc.running) picturesListProc.running = true
+    transitionCollection()
+  }
+
+  // Back to the theme, on the last picture added if there was one.
+  function exitPictures() {
+    if (!picturesMode) return
+    var name = pictureTheme ? pictureTheme.name : ""
+    var record = Model.findByName(themes, name)
+    var landed = pictureLastAdded && record && Model.backgroundIndexOf(record, pictureLastAdded) !== -1
+    picturesMode = false
+    searching = false
+    filterText = ""
+    pendingSelect = {theme: name, bg: landed ? pictureLastAdded : pictureReturnBg}
+    curationMessage = pictureAddedCount ? "Added " + pictureAddedCount + (pictureAddedCount === 1 ? " background to " : " backgrounds to ") + name : ""
+    curatedThemes = Model.curate(collection(), preferences, false, showHidden)
+    transitionCollection()
+  }
+
+  function nextPictureFolder() {
+    if (!picturesMode || !pictureFolders.length) return
+    pictureFolder = Model.nextFolder(pictureFolders, pictureFolder)
+    transitionCollection()
+  }
+
+  function addPicture() {
+    var row = selected
+    if (!picturesMode || !row || !row.picture || !pictureTheme) return
+    var theme = pictureTheme.name, path = row.picture
+    if (pictureAdded[path]) { curationMessage = "Already added to " + theme; return }
+    manage(["add-bg", theme, path], function(result) {
+      if (!result.ok) { root.curationMessage = result.error; return }
+      var added = Object.assign({}, root.pictureAdded)
+      added[path] = true
+      root.pictureAdded = added
+      root.pictureLastAdded = result.added[0]
+      root.pushUndo({type: "add", theme: theme, files: [Model.baseName(result.added[0])], source: path})
+      root.loadedIndex = ""
+      root.changeSeq += 1
+      root.requestRefresh()
+      root.curationMessage = "Added to " + theme + " · " + root.pictureAddedCount + " so far · Esc when done"
+    })
+  }
+
   function undo() {
     if (!undoStack.length) { curationMessage = "Nothing to undo"; return }
     if (manageProc.running || preferencesProc.running || !preferencesReady) return
@@ -810,6 +947,12 @@ Item {
         if (result.ok || result.code === "missing") root.undoStack = rest
         if (!result.ok) { root.curationMessage = result.error; return }
         for (var i = 0; i < result.removed.length; i++) root.entomb({theme: entry.theme, bg: result.removed[i]})
+        if (entry.source) {
+          var added = Object.assign({}, root.pictureAdded)
+          delete added[entry.source]
+          root.pictureAdded = added
+          if (result.removed.indexOf(root.pictureLastAdded) !== -1) root.pictureLastAdded = ""
+        }
         root.curatedThemes = Model.curate(root.collection(), root.preferences, false, root.showHidden)
         root.scrubQuick = true
         root.rebuild(false)
@@ -972,7 +1115,8 @@ Item {
     var keep = selected ? selected.name : ""
     var keepBackground = selectedBackground
     var keepBgIndex = bgIndex
-    rows = Model.browse(curatedThemes, filterText, "all", favoritesOnly)
+    rows = picturesMode ? Model.pictureRows(pictures, pictureTheme, pictureFolder, filterText)
+                        : Model.browse(curatedThemes, filterText, "all", favoritesOnly)
     var target = landOnCurrent && currentTheme ? currentTheme : keep
     // Something just restored takes the landing, once it is actually back.
     var pending = pendingSelect, pendingBg = -1
@@ -1183,7 +1327,10 @@ Item {
 
   // ---------------------------------------------------------------- wallpaper
 
-  onSelectedKeyChanged: if (opened) stageBackground()
+  onSelectedKeyChanged: {
+    if (opened) stageBackground()
+    if (picturesMode) pictureStageDelay.restart()
+  }
 
   function stageBackground() {
     if (selecting) return
@@ -1387,6 +1534,8 @@ Item {
   // ---------------------------------------------------------------- apply
 
   function apply() {
+    // In Pictures mode Enter adds the picture; it never changes the desktop.
+    if (picturesMode) { addPicture(); return }
     var t = selected
     if (!t || applying) return
     resetCollectionTransition()
@@ -1681,14 +1830,14 @@ Item {
             CacheImage {
               id: softImg
               anchors.fill: parent
-              path: Model.thumbPath(root.thumbsDir, slotItem.key)
+              path: Model.thumbPath(root.dirFor(slotItem.key), slotItem.key)
               sourceSize: Qt.size(640, 360)
               visible: stageImg.status !== Image.Ready
             }
             CacheImage {
               id: stageImg
               anchors.fill: parent
-              path: Model.stagePath(root.thumbsDir, slotItem.key, root.stageW, root.stageH)
+              path: Model.stagePath(root.dirFor(slotItem.key), slotItem.key, root.stageW, root.stageH)
               sourceSize: Qt.size(root.stageW, root.stageH)
               cache: false
             }
@@ -1838,12 +1987,21 @@ Item {
             root.confirmEmpty = false
             if (k === Qt.Key_Escape) return
           }
+          if (root.picturesMode) {
+            if (k === Qt.Key_Tab) { root.nextPictureFolder(); return }
+            if (k === Qt.Key_Escape && !root.searching) { root.exitPictures(); return }
+            // Theme and background actions have no meaning for a picture.
+            if (k === Qt.Key_Delete || (ctrl && (k === Qt.Key_F || k === Qt.Key_H))
+                || (!root.searching && event.modifiers === Qt.NoModifier
+                    && (k === Qt.Key_F || k === Qt.Key_B || k === Qt.Key_A || k === Qt.Key_E || k === Qt.Key_P))) return
+          }
           if (ctrl && shift && k === Qt.Key_Delete) root.emptyTrash()
           else if (event.modifiers === Qt.ControlModifier && k === Qt.Key_F) root.toggleFavoritesOnly()
           else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_F) root.toggleFavorite()
           else if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_H) root.toggleShowHidden()
           else if (ctrl && k === Qt.Key_Z) root.undo()
           else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_B) root.addBackgrounds()
+          else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_P) root.enterPictures()
           else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_A) root.beginAddTheme()
           else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_E) root.browseThemes()
           else if (k === Qt.Key_Delete && !root.searching && shift) root.removeTheme()
@@ -1887,7 +2045,7 @@ Item {
           spacing: root.sp(10)
           Text {
             id: titleName
-            text: root.selected ? root.selected.name : ""
+            text: root.picturesMode && root.pictureTheme ? root.pictureTheme.name : root.selected ? root.selected.name : ""
             textFormat: Text.PlainText
             color: root.selected && root.selected.mode === "light" ? root.fg : "#ffffff"
             font.family: Style.fontFamily
@@ -1952,6 +2110,32 @@ Item {
             }
           }
         }
+        Column {
+          visible: root.picturesMode
+          spacing: root.sp(4)
+          Text {
+            text: "Adding backgrounds from ~/Pictures" + (root.pictureFolder ? "/" + root.pictureFolder : "")
+            textFormat: Text.PlainText
+            color: titleName.color
+            font.family: Style.fontFamily
+            font.pixelSize: root.fz.title
+            font.weight: Font.DemiBold
+            style: Text.Raised
+            styleColor: Util.alpha(root.bg, 0.6)
+          }
+          Text {
+            width: root.sp(520)
+            elide: Text.ElideMiddle
+            text: root.selected ? (root.selected.caption || "") + (root.pictureAdded[root.selected.picture] ? "  ✓ added" : "") : ""
+            textFormat: Text.PlainText
+            color: titleName.color
+            opacity: 0.85
+            font.family: Style.fontFamily
+            font.pixelSize: root.fz.body
+            style: Text.Raised
+            styleColor: Util.alpha(root.bg, 0.6)
+          }
+        }
         Row {
           Repeater {
             model: root.ansi
@@ -1965,7 +2149,7 @@ Item {
           id: bgArea
           // Upstream showed this only when there was something to choose between;
           // here it is also where a background gets added, so it is always there.
-          visible: !!root.selected
+          visible: !!root.selected && !root.picturesMode
           width: root.bgThumbW + root.sp(120)
           height: root.bgStripH
           readonly property real selectedCenter: root.bgThumbH / 2
@@ -2137,7 +2321,7 @@ Item {
           ActionButton {
             id: bgAdd
             z: 1
-            anchors { left: bgStrip.right; leftMargin: root.sp(6) + Math.round((height + root.sp(6)) * root.rake) }
+            anchors { left: bgStrip.right; leftMargin: root.sp(6) + Math.round((height + root.sp(6)) * root.rake * 2) }
             y: Math.round(bgArea.selectedCenter + root.bgThumbH / 2 + root.sp(10))
             label: "Add"
             glyph: stage.glyphs.plus
@@ -2145,11 +2329,21 @@ Item {
             onActivated: root.addBackgrounds()
           }
           ActionButton {
+            id: bgPictures
+            z: 1
+            anchors { left: bgStrip.right; leftMargin: root.sp(6) + Math.round((height + root.sp(6)) * root.rake) }
+            y: bgAdd.y + bgAdd.height + root.sp(6)
+            label: "Pictures"
+            glyph: stage.glyphs.picture
+            hint: "Browse ~/Pictures full-screen in this theme's colours, and add from there · P"
+            onActivated: root.enterPictures()
+          }
+          ActionButton {
             id: bgRemove
             z: 1
             readonly property bool owned: Model.ownsBackground(root.selected, root.selectedBackground)
             anchors { left: bgStrip.right; leftMargin: root.sp(6) }
-            y: bgAdd.y + bgAdd.height + root.sp(6)
+            y: bgPictures.y + bgPictures.height + root.sp(6)
             visible: !!root.selected && root.selected.backgrounds.length > 0
             label: root.backgroundHidden ? "Restore" : owned ? "Remove" : "Hide"
             glyph: root.backgroundHidden ? stage.glyphs.show : owned ? stage.glyphs.trash : stage.glyphs.hide
@@ -2430,6 +2624,9 @@ Item {
       // Icons for the action buttons, as stroked paths on HiddenEye's 24 grid.
       readonly property var glyphs: ({
         plus: "M 12 5 V 19 M 5 12 H 19",
+        picture: "M 4 5 H 20 V 19 H 4 Z M 4 16 L 9 11 L 13 15 L 16 12 L 20 16 M 15 8 H 15.5",
+        done: "M 5 12 L 10 17 L 19 7",
+        folder: "M 3 7 V 18 H 21 V 9 H 12 L 10 7 Z",
         browse: "M 11 4 A 7 7 0 1 1 11 18 A 7 7 0 1 1 11 4 M 16 16 L 21 21",
         trash: "M 4 7 H 20 M 9 7 V 4 H 15 V 7 M 6 7 L 7 20 H 17 L 18 7 M 10 11 V 16 M 14 11 V 16",
         purge: "M 4 7 H 20 M 9 7 V 4 H 15 V 7 M 6 7 L 7 20 H 17 L 18 7 M 10 11 L 14 15 M 14 11 L 10 15",
@@ -2548,7 +2745,7 @@ Item {
         border.color: root.searching ? Util.alpha(root.accent, 0.8) : Util.alpha(root.fg, 0.16)
         Text {
           anchors { left: parent.left; right: searchHint.left; verticalCenter: parent.verticalCenter; leftMargin: root.sp(12); rightMargin: root.sp(12) }
-          text: root.searching ? root.filterText + "▍" : "Search themes"
+          text: root.searching ? root.filterText + "▍" : root.picturesMode ? "Search pictures" : "Search themes"
           textFormat: Text.PlainText
           elide: Text.ElideLeft
           color: root.fg
@@ -2559,7 +2756,7 @@ Item {
         Text {
           id: searchHint
           anchors { right: parent.right; verticalCenter: parent.verticalCenter; rightMargin: root.sp(12) }
-          text: root.searching ? (root.filterText ? "All themes · Esc" : "Esc") : root.favoritesOnly ? "Favorites · Ctrl+F" : "/"
+          text: root.searching ? (root.filterText && !root.picturesMode ? "All themes · Esc" : "Esc") : root.favoritesOnly && !root.picturesMode ? "Favorites · Ctrl+F" : "/"
           color: root.fg
           opacity: 0.45
           font.family: Style.fontFamily
@@ -2671,6 +2868,7 @@ Item {
         anchors { horizontalCenter: parent.horizontalCenter; bottom: stripArea.top; bottomMargin: root.sp(12) }
         text: root.confirmEmpty ? "Delete " + Model.formatBytes(root.trashBytes) + " for good? Press Enter or click again · Esc cancels"
               : root.hoverHint || root.curationMessage
+                || (root.picturesMode && root.rows.length ? "Enter adds this picture · Tab changes folder · / searches · Esc when done" : "")
         textFormat: Text.PlainText
         visible: text.length > 0
         opacity: root.chromeOpacity
@@ -2690,7 +2888,8 @@ Item {
 
         Text {
           anchors.horizontalCenter: parent.horizontalCenter
-          text: root.filterText ? "No themes match “" + root.filterText + "”" : root.favoritesOnly ? "No favorite themes yet" : "No themes available"
+          text: root.picturesMode ? (root.filterText ? "No pictures match “" + root.filterText + "”" : picturesListProc.running ? "Looking through ~/Pictures…" : "No pictures found")
+              : root.filterText ? "No themes match “" + root.filterText + "”" : root.favoritesOnly ? "No favorite themes yet" : "No themes available"
           textFormat: Text.PlainText
           color: root.fg
           font.family: Style.fontFamily
@@ -2701,7 +2900,8 @@ Item {
         }
         Text {
           anchors.horizontalCenter: parent.horizontalCenter
-          text: root.filterText ? "Esc clears search and returns to navigation" : root.favoritesOnly ? "Turn off Favorites to browse and star a theme" : "Install a theme to get started"
+          text: root.picturesMode ? (root.filterText ? "Esc clears the search" : root.pictureFolder ? "Tab moves to the next folder" : "Put JPEG, PNG, WebP or GIF files in ~/Pictures · Esc goes back")
+              : root.filterText ? "Esc clears search and returns to navigation" : root.favoritesOnly ? "Turn off Favorites to browse and star a theme" : "Install a theme to get started"
           color: root.fg
           opacity: 0.75
           font.family: Style.fontFamily
@@ -2895,7 +3095,7 @@ Item {
                   }
                   CacheImage {
                     anchors.fill: parent
-                    path: Model.thumbPath(root.thumbsDir, cell.theme.previewKey)
+                    path: Model.thumbPath(root.dirFor(cell.theme.previewKey), cell.theme.previewKey)
                     cache: true
                     sourceSize: Qt.size(Math.round(width * panel.dpr), Math.round(height * panel.dpr))
                     visible: status === Image.Ready
@@ -2944,7 +3144,7 @@ Item {
                       left: parent.left; bottom: parent.bottom; bottomMargin: root.sp(9)
                       leftMargin: root.sp(8) + Math.round((cardStar.implicitWidth + captionSpace.advanceWidth) * Math.min(1, cell.starT))
                     }
-                    text: cell.theme.name
+                    text: cell.theme.caption || cell.theme.name
                     textFormat: Text.PlainText
                     color: cell.theme.colors.foreground || "#fff"
                     font.family: Style.fontFamily
@@ -2954,6 +3154,17 @@ Item {
                   }
                 }
 
+                Text {
+                  visible: !!cell.theme.picture && !!root.pictureAdded[cell.theme.picture]
+                  anchors { right: parent.right; top: parent.top; rightMargin: root.sp(8); topMargin: root.sp(5) }
+                  text: "✓"
+                  color: cell.theme.colors.foreground || "#fff"
+                  font.family: Style.fontFamily
+                  font.pixelSize: root.fz.title
+                  font.weight: Font.Bold
+                  style: Text.Outline
+                  styleColor: cell.theme.colors.background || "#000"
+                }
                 HiddenEye {
                   visible: root.isThemeHidden(cell.theme.name)
                   anchors { right: parent.right; top: parent.top; rightMargin: root.sp(8); topMargin: root.sp(8) }
@@ -3076,7 +3287,10 @@ Item {
       Text {
         id: themeCount
         anchors { left: parent.left; bottom: parent.bottom; leftMargin: root.sp(56); bottomMargin: root.sp(14) }
-        text: (root.rows.length ? (root.selectedIndex + 1) + " / " + root.rows.length + (root.rows.length !== root.themes.length ? "  (" + root.themes.length + " total)" : "") : "no themes match")
+        text: root.picturesMode
+              ? (root.rows.length ? (root.selectedIndex + 1) + " / " + root.rows.length + " pictures" : "no pictures")
+                + (root.pictureAddedCount ? "  ·  " + root.pictureAddedCount + " added" : "")
+              : (root.rows.length ? (root.selectedIndex + 1) + " / " + root.rows.length + (root.rows.length !== root.themes.length ? "  (" + root.themes.length + " total)" : "") : "no themes match")
               + (root.hiddenThemes.length ? "  ·  " + root.hiddenThemes.length + " hidden" + (root.showHidden ? "" : " · Ctrl+H") : "")
         color: root.fg; opacity: 0.75 * root.chromeOpacity
         font.family: Style.fontFamily; font.pixelSize: root.fz.caption
@@ -3090,6 +3304,25 @@ Item {
         anchors { left: themeCount.right; bottom: parent.bottom; leftMargin: root.sp(28); bottomMargin: root.sp(8) }
         spacing: root.sp(8)
         ActionButton {
+          visible: root.picturesMode
+          label: root.selected && root.pictureAdded[root.selected.picture] ? "Added" : "Add to " + (root.pictureTheme ? root.pictureTheme.name : "theme")
+          glyph: root.selected && root.pictureAdded[root.selected.picture] ? stage.glyphs.done : stage.glyphs.plus
+          available: !!root.selected && !root.pictureAdded[root.selected.picture]
+          reason: root.selected ? "Already added on this visit" : "No picture selected"
+          hint: "Copy this picture into the theme's backgrounds · Enter"
+          onActivated: root.addPicture()
+        }
+        ActionButton {
+          visible: root.picturesMode
+          label: "Folder: " + (root.pictureFolder || "All")
+          glyph: stage.glyphs.folder
+          available: root.pictureFolders.length > 0
+          reason: "~/Pictures has no folders to narrow to"
+          hint: "Show one folder of ~/Pictures at a time · Tab"
+          onActivated: root.nextPictureFolder()
+        }
+        ActionButton {
+          visible: !root.picturesMode
           label: installProc.running && root.addingTheme ? "Installing…" : "Add theme"
           glyph: stage.glyphs.plus
           armed: root.addingTheme
@@ -3097,12 +3330,14 @@ Item {
           onActivated: root.beginAddTheme()
         }
         ActionButton {
+          visible: !root.picturesMode
           label: "Browse"
           glyph: stage.glyphs.browse
           hint: "Find themes in the Extra Themes plugin (closes this picker) · E"
           onActivated: root.browseThemes()
         }
         ActionButton {
+          visible: !root.picturesMode
           label: root.themeHidden ? "Restore theme" : root.selected && root.selected.source === "user" ? "Delete theme" : "Hide theme"
           glyph: root.themeHidden ? stage.glyphs.show : root.selected && root.selected.source === "user" ? stage.glyphs.trash : stage.glyphs.hide
           danger: !root.themeHidden && !!root.selected && root.selected.source === "user"
@@ -3123,6 +3358,7 @@ Item {
           onActivated: root.undo()
         }
         ActionButton {
+          visible: !root.picturesMode
           label: root.confirmEmpty ? "Delete for good?" : root.trashCount ? "Empty trash · " + Model.formatBytes(root.trashBytes) : "Empty trash"
           glyph: stage.glyphs.purge
           danger: true
@@ -3131,6 +3367,13 @@ Item {
           reason: "Nothing of LPSwatch's is in the trash"
           hint: "Permanently delete what LPSwatch trashed (" + root.trashCount + (root.trashCount === 1 ? " item" : " items") + ") · Ctrl+Shift+Delete"
           onActivated: root.emptyTrash()
+        }
+        ActionButton {
+          visible: root.picturesMode
+          label: "Done"
+          glyph: stage.glyphs.done
+          hint: "Back to the theme and its backgrounds · Esc"
+          onActivated: root.exitPictures()
         }
       }
       Row {

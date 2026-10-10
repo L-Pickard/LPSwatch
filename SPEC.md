@@ -2,7 +2,7 @@
 
 Status: APPROVED by Leo on 2026-10-10.
 
-Progress: slices 1 to 3 built (everything except B7, the Pictures browse). Automated tests pass; on-screen checks and Leo's sign-off on the look are still to do. Slices 1 and 2 are committed and pushed; slice 3 (B1, B2, undo of an install) is on the `add-themes` branch, uncommitted.
+Progress: every behaviour (B1 to B14) is built and its automated tests pass. Nothing has been checked on screen yet: the "Done means" table and Leo's sign-off on the look are still to do. Slices 1 to 3 are committed and pushed; slice 4 (B7, Pictures mode) is on the `pictures-browse` branch, uncommitted.
 Quick spec: Obsidian `Specs/Swatch plugin fork.md`. Upstream: `jmckible/omarchy-swatch` at `52bfa98`.
 
 ## Goal
@@ -127,6 +127,11 @@ None.
 | 2026-10-10 | Only https and ssh URLs are accepted, never a local path | A theme comes from a remote repository; this is narrower than Omarchy's own check |
 | 2026-10-10 | A repository only counts as a theme if it has a `colors.toml` (or the older `alacritty.toml`) | Stops an arbitrary repository being dropped into the themes folder |
 | 2026-10-10 | Undoing an install sends the theme to the trash | Same rule as every other removal |
+| 2026-10-10 | Pictures mode reuses the theme strip: each picture is shown as a card in the chosen theme's colours | The existing strip, full-screen preview, transitions and search then work on pictures unchanged, which keeps the fork small |
+| 2026-10-10 | Screen-size preview copies are made only for the picture being viewed and its neighbours, and dropped after 30 days unused | They are about 1 MB each; small strip thumbnails are made for the whole folder |
+| 2026-10-10 | Pictures mode looks 4 folders deep, at up to 2,000 pictures, and never follows links | Bounded like every other folder the plugin reads |
+| 2026-10-10 | A picture can be added once per visit to Pictures mode | Stops an accidental double Enter making two copies; the file chooser still allows deliberate duplicates |
+| 2026-10-10 | Folder narrowing is the `Tab` key | The spec named no key |
 | 2026-10-10 | A newly installed theme is previewed, not applied | Keeps Enter as the only thing that changes the desktop |
 | 2026-10-10 | Keys: `a` add theme, `e` Extra Themes, `b` add backgrounds, `p` Pictures, `Delete` remove background, `Shift+Delete` delete theme, `Ctrl+Z` undo | Approved as proposed |
 | 2026-10-10 | Backgrounds shipped inside a user-installed theme are trashed like any other | Otherwise most backgrounds could only be hidden. Accepted cost: that theme's `git pull` fails if its author later changes the same file |

@@ -222,6 +222,32 @@ function ownsBackground(theme, path) {
   return backgroundId(path).indexOf("extra:") === 0 || theme.source === "user"
 }
 
+// Pictures mode borrows the whole picker: each picture is a row wearing the
+// target theme's palette, with itself as its one background, so the strip, the
+// stage, the wipe and the search all work on pictures without knowing it.
+function pictureRows(pictures, theme, folder, text) {
+  var needle = norm(text), out = []
+  if (!theme) return out
+  for (var i = 0; i < pictures.length; i++) {
+    var p = pictures[i]
+    if (folder && p.folder !== folder) continue
+    if (needle && !fuzzy(norm(p.rel), needle)) continue
+    out.push({
+      name: p.rel, caption: baseName(p.rel), label: p.rel, source: "picture", picture: p.path,
+      mode: theme.mode, colors: theme.colors || {}, colorsToml: theme.colorsToml, shellToml: theme.shellToml,
+      preview: p.path, previewKey: p.key, backgrounds: [p.path], bgKeys: [p.key],
+      bgVideos: [""], bgVideoKeys: [""], hiddenCount: 0, favorite: false
+    })
+  }
+  return out
+}
+
+// "" is every folder; then each top-level folder in turn, and back.
+function nextFolder(folders, current) {
+  var all = [""].concat(folders || [])
+  return all[(all.indexOf(current) + 1) % all.length]
+}
+
 function formatBytes(bytes) {
   var n = Number(bytes) || 0
   if (n < 1024) return n + " B"
@@ -231,5 +257,5 @@ function formatBytes(bytes) {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { visibleThemes: visibleThemes, withoutTheme: withoutTheme, withoutBackground: withoutBackground, ownsBackground: ownsBackground, formatBytes: formatBytes, browse: browse, curate: curate, backgroundId: backgroundId, isHidden: isHidden, matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, backgroundIndexOf: backgroundIndexOf, keyAt: keyAt, thumbPath: thumbPath, stagePath: stagePath, videoKeyAt: videoKeyAt, videoPath: videoPath, hasVideo: hasVideo, ansi: ansi, MODES: MODES }
+  module.exports = { pictureRows: pictureRows, nextFolder: nextFolder, visibleThemes: visibleThemes, withoutTheme: withoutTheme, withoutBackground: withoutBackground, ownsBackground: ownsBackground, formatBytes: formatBytes, browse: browse, curate: curate, backgroundId: backgroundId, isHidden: isHidden, matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, backgroundIndexOf: backgroundIndexOf, keyAt: keyAt, thumbPath: thumbPath, stagePath: stagePath, videoKeyAt: videoKeyAt, videoPath: videoPath, hasVideo: hasVideo, ansi: ansi, MODES: MODES }
 }

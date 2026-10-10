@@ -86,8 +86,8 @@ fi
 mkdir -p "$U/userbg/backgrounds" "$HOME/.config/omarchy/backgrounds/userbg"; printf 'background = "#000000"\n' >"$U/userbg/colors.toml"
 png "$HOME/.config/omarchy/backgrounds/userbg/mine.png"; ln -s "$T/outside.png" "$HOME/.config/omarchy/backgrounds/userbg/link.png"
 printf 'good\n' >"$HOME/.local/state/omarchy/current/theme.name"
-mkdir -p "$XDG_CACHE_HOME/omarchy/swatch/thumbs"; : >"$XDG_CACHE_HOME/omarchy/swatch/thumbs/stale.jpg"; : >"$XDG_CACHE_HOME/omarchy/swatch/thumbs/bg-ffffffffffffffff.jpg"
-printf 'not json' >"$XDG_CACHE_HOME/omarchy/swatch/index.json"   # a corrupt cache must be ignored, not fatal
+mkdir -p "$XDG_CACHE_HOME/omarchy/lpswatch/thumbs"; : >"$XDG_CACHE_HOME/omarchy/lpswatch/thumbs/stale.jpg"; : >"$XDG_CACHE_HOME/omarchy/lpswatch/thumbs/bg-ffffffffffffffff.jpg"
+printf 'not json' >"$XDG_CACHE_HOME/omarchy/lpswatch/index.json"   # a corrupt cache must be ignored, not fatal
 
 echo "--- index.sh (cold)"
 start=$SECONDS; idx=$("$here/index.sh"); rc=$?; cold=$((SECONDS - start))
@@ -95,7 +95,7 @@ check "exit status"                 "$rc" 0
 check "finished under the deadline" "$(( cold < 20 ))" 1
 q() { jq -r "$1" <<<"$idx"; }
 t() { jq -r --arg n "$1" ".themes[] | select(.name == \$n) | $2" <<<"$idx"; }
-check "version/thumbsDir"      "$(q '.version, (.thumbsDir | endswith("/omarchy/swatch/thumbs"))' | paste -sd,)" "2,true"
+check "version/thumbsDir"      "$(q '.version, (.thumbsDir | endswith("/omarchy/lpswatch/thumbs"))' | paste -sd,)" "2,true"
 check "partial"                "$(q '.partial')" false
 check "currentTheme"           "$(q '.currentTheme')" good
 check "no record for bad name" "$(q '[.themes[].name] | index("bad name")')" null
@@ -179,7 +179,7 @@ sw=2560; sh=1440
 
 echo "--- thumbs.sh"
 start=$SECONDS; "$here/thumbs.sh"; rc=$?; echo "     ${SECONDS-start}s rc=$rc"
-D=$XDG_CACHE_HOME/omarchy/swatch/thumbs
+D=$XDG_CACHE_HOME/omarchy/lpswatch/thumbs
 k=$(t good '.bgKeys[1]'); pk=$(t good '.previewKey')
 check "good: stage + thumb"    "$(ls "$D/stage-$k-${sw}x${sh}.jpg" "$D/bg-$k.jpg" "$D/bg-$pk.jpg" 2>/dev/null | wc -l)" 3
 check "good: 1920x1080 source stays 1920x1080 (shrink only)" "$(vipsheader "$D/stage-$k-${sw}x${sh}.jpg" | sed 's/.*: //')" "1920x1080 uchar, 1 band, b-w, jpegload"
@@ -216,7 +216,7 @@ check "other size expired after 30 days, recent one kept" "$([[ -e $D/stage-${pk
 
 echo "--- planted links cannot redirect writes"
 victim=$T/victim; printf 'precious' >"$victim"
-ln -sfn "$victim" "$XDG_CACHE_HOME/omarchy/swatch/thumbs.lock"         # legacy lock path
+ln -sfn "$victim" "$XDG_CACHE_HOME/omarchy/lpswatch/thumbs.lock"         # legacy lock path
 head -c 100 /dev/urandom >"$U/good/backgrounds/notimage.png"           # will be refused by the header check
 idx3=$("$here/index.sh")
 nk=$(jq -r '.themes[] | select(.name == "good") | .backgrounds as $b | .bgKeys as $k | ($b | to_entries[] | select(.value | endswith("notimage.png")) | .key) as $i | $k[$i]' <<<"$idx3")

@@ -33,7 +33,7 @@ MAX_VIDEO_HEIGHT=4320
 VIDEO_FORMATS='^(mov,mp4,m4a,3gp,3g2,mj2|matroska,webm)$'
 VIDEO_CODECS='^(h264|hevc|vp8|vp9|av1)$'
 
-SWATCH_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/swatch
+SWATCH_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/lpswatch
 SWATCH_THUMBS=$SWATCH_CACHE/thumbs
 SWATCH_INDEX=$SWATCH_CACHE/index.json
 

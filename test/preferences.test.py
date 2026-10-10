@@ -14,7 +14,7 @@ class PreferencesTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.state = Path(self.temp.name)
-        self.path = self.state / "omarchy/swatch/preferences.json"
+        self.path = self.state / "omarchy/lpswatch/preferences.json"
         self.env = dict(os.environ, XDG_STATE_HOME=str(self.state))
 
     def run_helper(self, *args, success=True):

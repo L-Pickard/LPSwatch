@@ -1,4 +1,18 @@
-# Swatch — working notes for agents
+# LPSwatch — working notes for agents
+
+**This is LPSwatch, Leo Pickard's fork of Swatch** (id `lpickard.lpswatch`, repo `L-Pickard/LPSwatch`, upstream `jmckible/omarchy-swatch` as the `upstream` remote). `SPEC.md` is the contract for everything the fork adds; read it first. Everything below the next heading is upstream's notes and still holds, except where the fork section says otherwise.
+
+## What the fork changes
+
+- **It does modify the collection, on purpose.** Upstream's "never modify theme files" is replaced by a narrow allowance: `manage.py`, and only `manage.py`, may move things out of `~/.config/omarchy/themes/<theme>` and `~/.config/omarchy/backgrounds/<theme>`, and only into the user's freedesktop trash. It builds every path itself from `$HOME` and a validated name; no path comes from argv. Nothing is deleted outright except by `empty`, which removes only journalled items whose `.trashinfo` still names the path we recorded.
+- **State.** Cache and preferences live under `omarchy/lpswatch`, not `omarchy/swatch`. `manage.py` owns `collection.json` beside `preferences.json` (hidden themes and the trash journal); `preferences.py` is upstream's, untouched apart from the path.
+- **Stock themes and their backgrounds are hidden, never moved.** `remove-theme` decides trash-or-hide on the file it finds; the QML only picks the label.
+- **QML side** (`Swatch.qml`, "collection" section): one `manageProc`, one change at a time. A removal is shown at once via `entomb()` and confirmed by an index refresh; `tombstones` hold it out of any refresh that was already running. `undoStack` is per open. `pendingSelect` lands on a restored item once it is back in `rows`. `collection()` is what every `Model.curate` call is given, never `themes` directly, or hidden themes come back.
+- **Every action has an `ActionButton` and a key.** Buttons take the previewed theme's colours like the rest of the chrome; a new action is not done until it has both.
+- **Keep new logic in new files where practical** (`manage.py`, `test/manage.test.py`) so upstream can still be merged. Dev loop and plugin id in the commands below: substitute `lpickard.lpswatch`.
+- Tests: `python3 test/manage.test.py` (isolated HOME, includes hostile inputs) in addition to upstream's three.
+
+# Swatch — upstream working notes
 
 Omarchy shell plugin (Quickshell/QML + bash). Id `jmckible.swatch`, repo `jmckible/omarchy-swatch`, listed on omarchyplugins.com. The README is the user-facing contract; this file is the why behind the code.
 

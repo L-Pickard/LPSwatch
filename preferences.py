@@ -63,7 +63,7 @@ def main():
     # A read-only script descriptor serializes mutations without a writable lock file.
     with open(__file__, "rb") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        path = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "omarchy/swatch"
+        path = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "omarchy/lpswatch"
         if not path.exists() and action == "read":
             print(json.dumps({"version": 1, "favorites": [], "hidden": {}}))
             return

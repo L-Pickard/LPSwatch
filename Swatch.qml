@@ -36,7 +36,33 @@ Item {
   property string curationMessage: ""
   onCurationMessageChanged: if (curationMessage) curationNotice.restart()
   Timer { id: curationNotice; interval: 5000; onTriggered: root.curationMessage = "" }
-  property var undoHide: null
+  // ---- collection management (LPSwatch). manage.py owns the files and the
+  // journal of what was trashed; this side only asks, and shows the answer.
+  property var hiddenThemes: []
+  property int trashCount: 0
+  property double trashBytes: 0
+  // Everything done since this open, newest last. Forgotten on the next open;
+  // what was trashed stays in the trash either way.
+  property var undoStack: []
+  // The one permanent action asks twice.
+  property bool confirmEmpty: false
+  Timer { id: confirmLapse; interval: 6000; onTriggered: root.confirmEmpty = false }
+  property string hoverHint: ""
+  readonly property color dangerColor: selected ? selected.colors.red || "#e5484d" : "#e5484d"
+  readonly property bool themeHidden: !!selected && isThemeHidden(selected.name)
+  readonly property bool themeOnDesktop: !!selected && selected.name === currentTheme
+  function isThemeHidden(name) { return hiddenThemes.indexOf(name) !== -1 }
+  function collection() { return Model.visibleThemes(themes, hiddenThemes, showHidden, currentTheme) }
+  // A removal is shown at once, ahead of the index refresh that confirms it.
+  // A refresh already running when the change was made reports the old
+  // collection, so what it would bring back is held out until a refresh that
+  // started after the last change has landed.
+  property var tombstones: []
+  property int changeSeq: 0
+  property int refreshSeq: 0
+  property bool refreshAgain: false
+  // Where to land once a restored theme or background is back in the rows.
+  property var pendingSelect: null
   readonly property bool backgroundHidden: !!selected && Model.isHidden(preferences, selected.name, selectedBackground)
   // Stars are read from preferences, never from `rows`. Starring leaves the
   // strip holding the same themes in the same order, and replacing its model to
@@ -303,9 +329,14 @@ Item {
     openingFavoritesSettled = false
     // Use cached state for the first frame, then reconcile both async reads.
     favoritesOnly = preferences.favorites.indexOf(currentTheme) !== -1
-    curatedThemes = Model.curate(themes, preferences, false, showHidden)
+    curatedThemes = Model.curate(collection(), preferences, false, showHidden)
     curationMessage = ""
+    undoStack = []
+    confirmEmpty = false
+    hoverHint = ""
+    pendingSelect = null
     readPreferences()
+    readCollection()
     opened = true
     // Land on the current theme from the previous open's index before asking
     // for a fresh one. selectedIndex survives close(), and indexProc is async,
@@ -365,7 +396,7 @@ Item {
         root.currentBackground = state.currentBackground
         root.openingIndexReady = true
         root.settleOpeningFavorites()
-        root.curatedThemes = Model.curate(root.themes, root.preferences, false, root.showHidden)
+        root.curatedThemes = Model.curate(root.collection(), root.preferences, false, root.showHidden)
         root.rebuild(true)
         if (!refreshProc.running) refreshProc.running = true
       }
@@ -375,6 +406,11 @@ Item {
   Process {
     id: refreshProc
     command: [root.scriptPath("index.sh")]
+    onRunningChanged: if (running) root.refreshSeq = root.changeSeq
+    onExited: if (root.refreshAgain) {
+      root.refreshAgain = false
+      Qt.callLater(function() { refreshProc.running = true })
+    }
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.loadIndex(text, true) }
   }
 
@@ -412,7 +448,7 @@ Item {
   function readPreferences() {
     if (preferencesProc.running) return
     preferencesReady = false
-    preferencesProc.nextUndo = undoHide
+    preferencesProc.nextUndo = null
     preferencesProc.successMessage = ""
     preferencesProc.command = ["python3", scriptPath("preferences.py"), "read"]
     preferencesProc.running = true
@@ -435,8 +471,8 @@ Item {
           root.favoritePulse = ""
           root.preferencesReady = true
           var landed = root.settleOpeningFavorites()
-          root.curatedThemes = Model.curate(root.themes, root.preferences, false, root.showHidden)
-          root.undoHide = preferencesProc.nextUndo
+          root.curatedThemes = Model.curate(root.collection(), root.preferences, false, root.showHidden)
+          if (preferencesProc.nextUndo) root.pushUndo(preferencesProc.nextUndo)
           root.curationMessage = preferencesProc.successMessage
           if (favorite && root.favoritesOnly && !root.filterText) root.transitionCollection()
           // A star anywhere else changes no row's membership or order (search
@@ -462,7 +498,7 @@ Item {
 
   function toggleFavorite() {
     if (!selected) return
-    saveChoice("favorite", selected.name, !selectedFavorite, "", undoHide, "")
+    saveChoice("favorite", selected.name, !selectedFavorite, "", null, "")
   }
 
   function toggleBackgroundHidden() {
@@ -478,12 +514,189 @@ Item {
     }
     var key = Model.backgroundId(selectedBackground)
     saveChoice("hidden", selected.name, !hidden, key,
-               hidden ? null : {name: selected.name, key: key},
-               "")
+               hidden ? null : {type: "hideBg", name: selected.name, key: key},
+               hidden ? "" : "Hidden: this background belongs to a stock theme · Ctrl+Z to undo")
   }
 
-  function restoreLastHidden() {
-    if (undoHide) saveChoice("hidden", undoHide.name, false, undoHide.key, null, "")
+  // ---------------------------------------------------------------- collection
+
+  Process {
+    id: manageProc
+    property var done: null
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var done = manageProc.done
+        manageProc.done = null
+        var result = null
+        try { result = JSON.parse(text) } catch (e) { result = null }
+        // No answer means manage.py refused to trust its own state; it changes
+        // nothing in that case.
+        if (!result) { root.curationMessage = "Could not change the collection; nothing was removed"; return }
+        root.trashCount = Number(result.trashCount) || 0
+        root.trashBytes = Number(result.trashBytes) || 0
+        var before = JSON.stringify(root.hiddenThemes)
+        if (Array.isArray(result.hiddenThemes) && JSON.stringify(result.hiddenThemes) !== before)
+          root.hiddenThemes = result.hiddenThemes
+        if (done) done(result, JSON.stringify(root.hiddenThemes) !== before)
+      }
+    }
+  }
+
+  // argv only, through manage.py. One change at a time: the answer to each is
+  // what the next one is decided on.
+  function manage(args, done) {
+    if (manageProc.running) { curationMessage = "Still working on the last change"; return false }
+    confirmEmpty = false
+    manageProc.done = done || null
+    manageProc.command = ["python3", scriptPath("manage.py")].concat(args)
+    manageProc.running = true
+    return true
+  }
+
+  function readCollection() {
+    if (manageProc.running) return
+    manage(["status"], function(result, hiddenChanged) {
+      if (!hiddenChanged) return
+      root.curatedThemes = Model.curate(root.collection(), root.preferences, false, root.showHidden)
+      root.scrubQuick = true
+      root.rebuild(!root.viewReady)
+    })
+  }
+
+  function pushUndo(entry) { var s = undoStack.slice(); s.push(entry); undoStack = s }
+
+  function requestRefresh() {
+    if (refreshProc.running) refreshAgain = true
+    else refreshProc.running = true
+  }
+
+  // Show a removal now; see `tombstones`.
+  function entomb(stone) {
+    var t = tombstones.slice(); t.push(stone); tombstones = t
+    themes = withoutTombstones(themes, [stone])
+    loadedIndex = ""
+    changeSeq += 1
+  }
+
+  function withoutTombstones(list, stones) {
+    for (var i = 0; i < stones.length; i++)
+      list = stones[i].bg ? Model.withoutBackground(list, stones[i].theme, stones[i].bg)
+                          : Model.withoutTheme(list, stones[i].theme)
+    return list
+  }
+
+  // Step off the selected theme before it leaves the strip, so the wallpaper
+  // wipes to its neighbour instead of the strip jumping back to the start.
+  function leaveSelected(name) {
+    if (!selected || selected.name !== name || rows.length < 2) return
+    noteMove("theme", 1)
+    selectTheme(selectedIndex + 1 < rows.length ? selectedIndex + 1 : selectedIndex - 1)
+  }
+
+  // Delete means gone when the theme is the user's own, hidden when it is a
+  // stock theme — manage.py decides which, on the file it finds.
+  function removeTheme() {
+    var t = selected
+    if (!t) return
+    if (isThemeHidden(t.name)) {
+      manage(["hide-theme", t.name, "false"], function(result) {
+        if (!result.ok) { root.curationMessage = result.error; return }
+        root.curationMessage = "Restored " + t.name
+        root.recurate()
+      })
+      return
+    }
+    if (t.name === currentTheme) { curationMessage = "That theme is on your desktop. Apply another one first"; return }
+    manage(["remove-theme", t.name], function(result) {
+      if (!result.ok) { root.curationMessage = result.error; return }
+      var trashed = result.action === "trashed"
+      if (trashed || !root.showHidden) root.leaveSelected(t.name)
+      if (trashed) {
+        root.pushUndo({type: "trash", id: result.id})
+        root.entomb({theme: t.name})
+        root.requestRefresh()
+        root.curationMessage = "Moved " + t.name + " to the trash · Ctrl+Z to undo"
+      } else {
+        root.pushUndo({type: "hideTheme", name: t.name})
+        root.curationMessage = "Hidden: " + t.name + " is a stock theme and can't be deleted · Ctrl+Z to undo"
+      }
+      root.recurate()
+    })
+  }
+
+  function removeBackground() {
+    var t = selected
+    if (!t || !t.backgrounds.length) return
+    var path = selectedBackground
+    // A stock theme's own background is not ours to move; hiding is all there is.
+    if (backgroundHidden || !Model.ownsBackground(t, path)) { toggleBackgroundHidden(); return }
+    var original = Model.findByName(themes, t.name)
+    var visibleCount = original.backgrounds.filter(function(p) {
+      return !Model.isHidden(root.preferences, original.name, p)
+    }).length
+    if (visibleCount <= 1) { curationMessage = "Keep one background visible for this theme"; return }
+    var id = Model.backgroundId(path), cut = id.indexOf(":")
+    manage(["trash-bg", t.name, id.slice(0, cut), id.slice(cut + 1)], function(result) {
+      if (!result.ok) {
+        if (result.code === "hide" && root.selectedBackground === path) root.toggleBackgroundHidden()
+        else root.curationMessage = result.error
+        return
+      }
+      root.pushUndo({type: "trash", id: result.id})
+      root.entomb({theme: t.name, bg: path})
+      root.curatedThemes = Model.curate(root.collection(), root.preferences, false, root.showHidden)
+      root.scrubQuick = true
+      root.rebuild(false)
+      root.requestRefresh()
+      root.curationMessage = "Moved the background to the trash · Ctrl+Z to undo"
+    })
+  }
+
+  function undo() {
+    if (!undoStack.length) { curationMessage = "Nothing to undo"; return }
+    if (manageProc.running || preferencesProc.running || !preferencesReady) return
+    var rest = undoStack.slice(), entry = rest.pop()
+    if (entry.type === "hideBg") {
+      undoStack = rest
+      saveChoice("hidden", entry.name, false, entry.key, null, "Background restored")
+    } else if (entry.type === "hideTheme") {
+      manage(["hide-theme", entry.name, "false"], function(result) {
+        if (!result.ok) { root.curationMessage = result.error; return }
+        root.undoStack = rest
+        root.pendingSelect = {theme: entry.name, bg: ""}
+        root.curationMessage = "Restored " + entry.name
+        root.recurate()
+      })
+    } else {
+      manage(["restore", entry.id], function(result) {
+        // Gone from the trash by some other hand: nothing left to undo there.
+        if (result.ok || result.code === "missing") root.undoStack = rest
+        if (!result.ok) { root.curationMessage = result.error; return }
+        var bg = result.kind === "bg" ? result.path : ""
+        root.tombstones = root.tombstones.filter(function(stone) {
+          return stone.theme !== result.theme || (stone.bg || "") !== bg
+        })
+        root.pendingSelect = {theme: result.theme, bg: bg}
+        root.loadedIndex = ""
+        root.changeSeq += 1
+        root.requestRefresh()
+        root.curationMessage = result.kind === "bg" ? "Background restored" : "Restored " + result.theme
+      })
+    }
+  }
+
+  // Permanent, so it takes two presses; the second has to come within a few
+  // seconds of the first.
+  function emptyTrash() {
+    if (!trashCount) { curationMessage = "Nothing of LPSwatch's is in the trash"; return }
+    if (!confirmEmpty) { confirmEmpty = true; confirmLapse.restart(); return }
+    confirmLapse.stop()
+    manage(["empty"], function(result) {
+      if (!result.ok) { root.curationMessage = result.error; return }
+      root.undoStack = root.undoStack.filter(function(entry) { return entry.type !== "trash" })
+      root.curationMessage = "Deleted for good · " + Model.formatBytes(result.freed) + " freed"
+    })
   }
 
   function curationStatus() { return JSON.stringify({available: true, ready: preferencesReady, favorites: preferences.favorites.length, viewReady: viewReady}) }
@@ -517,7 +730,7 @@ Item {
   }
 
   function recurate() {
-    curatedThemes = Model.curate(themes, preferences, false, showHidden)
+    curatedThemes = Model.curate(collection(), preferences, false, showHidden)
     transitionCollection()
   }
 
@@ -593,10 +806,11 @@ Item {
     if (w >= 320 && w <= 7680 && h >= 200 && h <= 4320) { stageW = Math.round(w); stageH = Math.round(h) }
     currentTheme = parsed.currentTheme || ""
     currentBackground = parsed.currentBackground || ""
-    if (changed) themes = parsed.themes || []
+    if (refresh && refreshSeq === changeSeq) tombstones = []
+    if (changed) themes = withoutTombstones(parsed.themes || [], tombstones)
     openingIndexReady = true
     settleOpeningFavorites()
-    curatedThemes = Model.curate(themes, preferences, false, showHidden)
+    curatedThemes = Model.curate(collection(), preferences, false, showHidden)
     rebuild(!refresh || !opened || !viewReady)
     stageBackground()
     if (!thumbsProc.running) thumbsProc.running = true
@@ -612,10 +826,20 @@ Item {
     var keepBgIndex = bgIndex
     rows = Model.browse(curatedThemes, filterText, "all", favoritesOnly)
     var target = landOnCurrent && currentTheme ? currentTheme : keep
+    // Something just restored takes the landing, once it is actually back.
+    var pending = pendingSelect, pendingBg = -1
+    if (pending) {
+      var back = Model.findByName(rows, pending.theme)
+      pendingBg = back && pending.bg ? Model.backgroundIndexOf(back, pending.bg) : -1
+      if (back && (!pending.bg || pendingBg !== -1)) { target = pending.theme; pendingSelect = null }
+      else pending = null
+    }
     var i = Model.indexOf(rows, target)
     if (i === -1) i = rows.length ? 0 : -1
     selectedIndex = i
-    if (landOnCurrent) {
+    if (pending) {
+      bgIndex = pendingBg === -1 ? 0 : pendingBg
+    } else if (landOnCurrent) {
       var t = rows[i]
       var bi = Model.backgroundIndexOf(t, currentBackground)
       bgIndex = bi === -1 ? 0 : bi
@@ -661,6 +885,7 @@ Item {
     scrubAxis = axis
     scrubDir = dir
     scrubQuick = wiping
+    pendingSelect = null
     disarmVideo()
   }
 
@@ -1458,11 +1683,20 @@ Item {
           if (root.applying) return          // committed; the exit is running
           var k = event.key
           if (!root.viewReady) { if (k === Qt.Key_Escape) root.dismiss(); return }
-          if (event.modifiers === Qt.ControlModifier && k === Qt.Key_F) root.toggleFavoritesOnly()
+          var ctrl = !!(event.modifiers & Qt.ControlModifier), shift = !!(event.modifiers & Qt.ShiftModifier)
+          if (root.confirmEmpty && k !== Qt.Key_Shift && k !== Qt.Key_Control && k !== Qt.Key_Alt && k !== Qt.Key_Meta) {
+            // Enter confirms the delete; it must never fall through to apply.
+            if (k === Qt.Key_Return || k === Qt.Key_Enter) { root.emptyTrash(); return }
+            root.confirmEmpty = false
+            if (k === Qt.Key_Escape) return
+          }
+          if (ctrl && shift && k === Qt.Key_Delete) root.emptyTrash()
+          else if (event.modifiers === Qt.ControlModifier && k === Qt.Key_F) root.toggleFavoritesOnly()
           else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_F) root.toggleFavorite()
           else if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_H) root.toggleShowHidden()
-          else if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_Z) root.restoreLastHidden()
-          else if (k === Qt.Key_Delete && !root.searching) root.toggleBackgroundHidden()
+          else if (ctrl && k === Qt.Key_Z) root.undo()
+          else if (k === Qt.Key_Delete && !root.searching && shift) root.removeTheme()
+          else if (k === Qt.Key_Delete && !root.searching) root.removeBackground()
           else if (k === Qt.Key_Escape) { if (root.searching) root.endSearch(); else root.dismiss() }
           else if (!root.searching && event.modifiers === Qt.NoModifier && (k === Qt.Key_Space || k === Qt.Key_Slash)) root.beginSearch()
           else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_H) root.move(-1, true)
@@ -1740,6 +1974,23 @@ Item {
             Text { text: "↑ ↓"; color: root.fg; opacity: 0.5; font.family: Style.fontFamily; font.pixelSize: root.fz.caption }
           }
 
+          // Declared after the wheel catcher's siblings so it takes its own clicks.
+          ActionButton {
+            id: bgRemove
+            z: 1
+            readonly property bool owned: Model.ownsBackground(root.selected, root.selectedBackground)
+            anchors { left: bgStrip.right; leftMargin: root.sp(6) }
+            y: Math.round(bgArea.selectedCenter + root.bgThumbH / 2 + root.sp(10))
+            visible: !!root.selected && root.selected.backgrounds.length > 0
+            label: root.backgroundHidden ? "Restore" : owned ? "Remove" : "Hide"
+            glyph: root.backgroundHidden ? stage.glyphs.show : owned ? stage.glyphs.trash : stage.glyphs.hide
+            danger: owned && !root.backgroundHidden
+            hint: root.backgroundHidden ? "Show this background again · Delete"
+                : owned ? "Move this background to the trash · Delete"
+                        : "Hide this background (stock themes can't be changed) · Delete"
+            onActivated: root.removeBackground()
+          }
+
           MouseArea {
             anchors.fill: parent
             acceptedButtons: Qt.NoButton
@@ -2007,6 +2258,112 @@ Item {
         }
       }
 
+      // Icons for the action buttons, as stroked paths on HiddenEye's 24 grid.
+      readonly property var glyphs: ({
+        trash: "M 4 7 H 20 M 9 7 V 4 H 15 V 7 M 6 7 L 7 20 H 17 L 18 7 M 10 11 V 16 M 14 11 V 16",
+        purge: "M 4 7 H 20 M 9 7 V 4 H 15 V 7 M 6 7 L 7 20 H 17 L 18 7 M 10 11 L 14 15 M 14 11 L 10 15",
+        undo: "M 9 14 L 4 9 L 9 4 M 4 9 H 14 A 6 6 0 0 1 14 21 H 11",
+        hide: "M 2 12 C 6 3 18 3 22 12 C 18 21 6 21 2 12 Z M 15 12 A 3 3 0 1 1 9 12 A 3 3 0 1 1 15 12 M 3 3 L 21 21",
+        show: "M 2 12 C 6 3 18 3 22 12 C 18 21 6 21 2 12 Z M 15 12 A 3 3 0 1 1 9 12 A 3 3 0 1 1 15 12"
+      })
+
+      // One control for every action, cut from the same film as the cards: the
+      // shared rake, the candidate's own ground and ink, a hairline that turns
+      // to the accent under the pointer. Each also has a key; hovering says
+      // which, and an unavailable one says why instead of doing nothing.
+      component ActionButton: Item {
+        id: button
+        property string label: ""
+        property string glyph: ""
+        property string hint: ""       // what it does and its key, shown on hover
+        property string reason: ""     // why it is unavailable
+        property bool available: true
+        property bool danger: false
+        property bool armed: false     // waiting for the confirming second press
+        signal activated()
+        readonly property int skew: Math.round(height * root.rake)
+        readonly property bool lit: available && (buttonHover.hovered || armed)
+        readonly property color ink: danger && lit ? root.dangerColor : root.fg
+        readonly property string said: available ? hint : reason
+        height: root.sp(28)
+        width: buttonContent.implicitWidth + root.sp(24) + skew
+        opacity: available ? 1 : 0.42
+        scale: buttonPress.pressed && available ? 0.96 : 1
+        Behavior on opacity { NumberAnimation { duration: 120 } }
+        Behavior on scale { NumberAnimation { duration: 80; easing.type: Easing.OutQuad } }
+        Behavior on width { enabled: root.viewReady; NumberAnimation { duration: 140; easing.type: Easing.OutQuad } }
+        Accessible.role: Accessible.Button
+        Accessible.name: label
+        Accessible.description: said
+
+        Shape {
+          anchors.fill: parent
+          antialiasing: true
+          preferredRendererType: Shape.CurveRenderer
+          ShapePath {
+            fillColor: Util.alpha(root.bg, button.armed ? 0.94 : button.lit ? 0.88 : 0.62)
+            strokeColor: button.lit ? (button.danger ? root.dangerColor : root.accent) : Util.alpha(root.fg, 0.24)
+            strokeWidth: button.lit ? root.sp(2) : 1
+            startX: button.skew; startY: 0
+            PathLine { x: button.width; y: 0 }
+            PathLine { x: button.width - button.skew; y: button.height }
+            PathLine { x: 0; y: button.height }
+            PathLine { x: button.skew; y: 0 }
+          }
+        }
+        Row {
+          id: buttonContent
+          anchors.centerIn: parent
+          spacing: root.sp(7)
+          Item {
+            width: root.sp(14)
+            height: root.sp(14)
+            anchors.verticalCenter: parent.verticalCenter
+            visible: button.glyph !== ""
+            Shape {
+              width: 24
+              height: 24
+              transform: Scale { xScale: root.sp(14) / 24; yScale: root.sp(14) / 24 }
+              preferredRendererType: Shape.CurveRenderer
+              ShapePath {
+                strokeColor: button.ink
+                strokeWidth: 1.9
+                fillColor: "transparent"
+                capStyle: ShapePath.RoundCap
+                joinStyle: ShapePath.RoundJoin
+                PathSvg { path: button.glyph }
+              }
+            }
+          }
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: button.label
+            textFormat: Text.PlainText
+            color: button.ink
+            font.family: Style.fontFamily
+            font.pixelSize: root.fz.caption
+            font.weight: Font.DemiBold
+          }
+        }
+        HoverHandler {
+          id: buttonHover
+          cursorShape: button.available ? Qt.PointingHandCursor : Qt.ArrowCursor
+          onHoveredChanged: {
+            if (hovered) root.hoverHint = button.said
+            else if (root.hoverHint === button.said) root.hoverHint = ""
+          }
+        }
+        onSaidChanged: if (buttonHover.hovered) root.hoverHint = said
+        MouseArea {
+          id: buttonPress
+          anchors.fill: parent
+          onClicked: {
+            if (button.available) button.activated()
+            else root.curationMessage = button.reason
+          }
+        }
+      }
+
       // Scope lives inside the search field; theme stars only mark favorites.
       Rectangle {
         id: searchField
@@ -2043,10 +2400,12 @@ Item {
       // Errors and constraints surface briefly; ordinary curation is visual.
       Text {
         anchors { horizontalCenter: parent.horizontalCenter; bottom: stripArea.top; bottomMargin: root.sp(12) }
-        text: root.curationMessage
+        text: root.confirmEmpty ? "Delete " + Model.formatBytes(root.trashBytes) + " for good? Press Enter or click again · Esc cancels"
+              : root.hoverHint || root.curationMessage
+        textFormat: Text.PlainText
         visible: text.length > 0
         opacity: root.chromeOpacity
-        color: root.fg
+        color: root.confirmEmpty ? root.dangerColor : root.fg
         font.family: Style.fontFamily
         font.pixelSize: root.fz.caption
         style: Text.Outline
@@ -2326,6 +2685,14 @@ Item {
                   }
                 }
 
+                HiddenEye {
+                  visible: root.isThemeHidden(cell.theme.name)
+                  anchors { right: parent.right; top: parent.top; rightMargin: root.sp(8); topMargin: root.sp(8) }
+                  width: root.sp(14)
+                  height: root.sp(14)
+                  ink: cell.theme.colors.foreground || "#fff"
+                }
+
                 // A hairline, never an accent border: the gate does the marking,
                 // so the live card can keep its artwork unframed.
                 Shape {
@@ -2438,12 +2805,55 @@ Item {
 
       // ---- footer
       Text {
+        id: themeCount
         anchors { left: parent.left; bottom: parent.bottom; leftMargin: root.sp(56); bottomMargin: root.sp(14) }
-        text: root.rows.length ? (root.selectedIndex + 1) + " / " + root.rows.length + (root.rows.length !== root.themes.length ? "  (" + root.themes.length + " total)" : "") : "no themes match"
+        text: (root.rows.length ? (root.selectedIndex + 1) + " / " + root.rows.length + (root.rows.length !== root.themes.length ? "  (" + root.themes.length + " total)" : "") : "no themes match")
+              + (root.hiddenThemes.length ? "  ·  " + root.hiddenThemes.length + " hidden" + (root.showHidden ? "" : " · Ctrl+H") : "")
         color: root.fg; opacity: 0.75 * root.chromeOpacity
         font.family: Style.fontFamily; font.pixelSize: root.fz.caption
       }
+      // Theme actions sit on the band under the theme strip, beside its count,
+      // inside the scrim that is already there: nothing new over the wallpaper.
       Row {
+        id: actionRow
+        opacity: root.chromeOpacity
+        enabled: !root.applying
+        anchors { left: themeCount.right; bottom: parent.bottom; leftMargin: root.sp(28); bottomMargin: root.sp(8) }
+        spacing: root.sp(8)
+        ActionButton {
+          label: root.themeHidden ? "Restore theme" : root.selected && root.selected.source === "user" ? "Delete theme" : "Hide theme"
+          glyph: root.themeHidden ? stage.glyphs.show : root.selected && root.selected.source === "user" ? stage.glyphs.trash : stage.glyphs.hide
+          danger: !root.themeHidden && !!root.selected && root.selected.source === "user"
+          available: !!root.selected && (root.themeHidden || !root.themeOnDesktop)
+          reason: root.selected ? "This theme is on your desktop. Apply another one first" : "No theme selected"
+          hint: root.themeHidden ? "Show this theme again · Shift+Delete"
+              : root.selected && root.selected.source === "user" ? "Move this theme to the trash · Shift+Delete"
+                                                                 : "Hide this theme (stock themes can't be deleted) · Shift+Delete"
+          onActivated: root.removeTheme()
+        }
+        Item { width: root.sp(10); height: 1 }
+        ActionButton {
+          label: "Undo"
+          glyph: stage.glyphs.undo
+          available: root.undoStack.length > 0
+          reason: "Nothing to undo yet"
+          hint: "Undo the last change · Ctrl+Z"
+          onActivated: root.undo()
+        }
+        ActionButton {
+          label: root.confirmEmpty ? "Delete for good?" : root.trashCount ? "Empty trash · " + Model.formatBytes(root.trashBytes) : "Empty trash"
+          glyph: stage.glyphs.purge
+          danger: true
+          armed: root.confirmEmpty
+          available: root.trashCount > 0
+          reason: "Nothing of LPSwatch's is in the trash"
+          hint: "Permanently delete what LPSwatch trashed (" + root.trashCount + (root.trashCount === 1 ? " item" : " items") + ") · Ctrl+Shift+Delete"
+          onActivated: root.emptyTrash()
+        }
+      }
+      Row {
+        // Key hints give way when the buttons need the room.
+        visible: x > actionRow.x + actionRow.width + root.sp(24)
         opacity: root.chromeOpacity
         anchors { right: parent.right; bottom: parent.bottom; rightMargin: root.sp(56); bottomMargin: root.sp(14) }
         spacing: root.sp(18)
@@ -2480,7 +2890,7 @@ Item {
         Text {
           id: openingLabel
           anchors.centerIn: parent
-          text: "Opening Swatch…"
+          text: "Opening LPSwatch…"
           color: Commons.Color.foreground
           font.family: Style.fontFamily
           font.pixelSize: root.fz.body
@@ -2519,5 +2929,5 @@ Item {
     Math.max(bgThumbH, stripArea.y - root.sp(24) - (titleBlock.y + bgArea.y)))
 
   // Keep the index warm so the first open doesn't wait on a cold walk.
-  Component.onCompleted: { freezeMetrics(); readPreferences(); indexProc.running = true }
+  Component.onCompleted: { freezeMetrics(); readPreferences(); readCollection(); indexProc.running = true }
 }

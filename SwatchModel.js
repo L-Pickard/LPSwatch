@@ -178,6 +178,58 @@ function ansi(theme) {
   return [c.red, c.yellow, c.green, c.cyan, c.blue, c.magenta].map(function(x) { return x || "#808080" })
 }
 
+// ---- collection management (LPSwatch)
+
+// Hidden themes leave the strip unless they are being revealed. The theme on
+// the desktop is always shown: the picker has to be able to land on it.
+function visibleThemes(themes, hiddenNames, showHidden, currentTheme) {
+  if (showHidden || !hiddenNames || !hiddenNames.length) return themes
+  return themes.filter(function(theme) {
+    return theme.name === currentTheme || hiddenNames.indexOf(theme.name) === -1
+  })
+}
+
+// A removal is shown at once and confirmed by the index refresh that follows.
+// Both return new arrays and new rows; cached index records are never edited.
+function withoutTheme(themes, name) {
+  return themes.filter(function(theme) { return theme.name !== name })
+}
+
+function withoutBackground(themes, name, path) {
+  return themes.map(function(theme) {
+    if (theme.name !== name) return theme
+    var at = (theme.backgrounds || []).indexOf(path)
+    if (at === -1) return theme
+    var row = Object.assign({}, theme)
+    // All four together, or every later clip slides onto the wrong wallpaper.
+    ;["backgrounds", "bgKeys", "bgVideos", "bgVideoKeys"].forEach(function(field) {
+      var list = (theme[field] || []).slice()
+      if (at < list.length) list.splice(at, 1)
+      row[field] = list
+    })
+    if (theme.preview === path) {
+      row.preview = row.backgrounds[0] || ""
+      row.previewKey = row.bgKeys[0] || ""
+    }
+    return row
+  })
+}
+
+// Whether removing this background means moving a file (ours) or only hiding
+// it (a stock theme's). manage.py takes the real decision; this picks the label.
+function ownsBackground(theme, path) {
+  if (!theme || !path) return false
+  return backgroundId(path).indexOf("extra:") === 0 || theme.source === "user"
+}
+
+function formatBytes(bytes) {
+  var n = Number(bytes) || 0
+  if (n < 1024) return n + " B"
+  var units = ["KB", "MB", "GB", "TB"], u = -1
+  do { n /= 1024; u++ } while (n >= 1024 && u < units.length - 1)
+  return (n >= 100 ? Math.round(n) : n.toFixed(1)) + " " + units[u]
+}
+
 if (typeof module !== "undefined") {
-  module.exports = { browse: browse, curate: curate, backgroundId: backgroundId, isHidden: isHidden, matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, backgroundIndexOf: backgroundIndexOf, keyAt: keyAt, thumbPath: thumbPath, stagePath: stagePath, videoKeyAt: videoKeyAt, videoPath: videoPath, hasVideo: hasVideo, ansi: ansi, MODES: MODES }
+  module.exports = { visibleThemes: visibleThemes, withoutTheme: withoutTheme, withoutBackground: withoutBackground, ownsBackground: ownsBackground, formatBytes: formatBytes, browse: browse, curate: curate, backgroundId: backgroundId, isHidden: isHidden, matches: matches, filter: filter, nextMode: nextMode, indexOf: indexOf, findByName: findByName, clamp: clamp, wrap: wrap, backgroundAt: backgroundAt, backgroundIndexOf: backgroundIndexOf, keyAt: keyAt, thumbPath: thumbPath, stagePath: stagePath, videoKeyAt: videoKeyAt, videoPath: videoPath, hasVideo: hasVideo, ansi: ansi, MODES: MODES }
 }

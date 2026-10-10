@@ -143,3 +143,38 @@ assert.deepEqual(Model.browse(searchCollection, 'last', 'stock', true).map(t => 
 assert.deepEqual(Model.browse(searchCollection, '', 'dark', true).map(t => t.name), ['tokyo-night'])
 assert.deepEqual(Model.browse(searchCollection, 'tokyo', 'light', false)[0].backgrounds, ['/b/2.jpg'])
 assert.deepEqual(Model.browse(searchCollection, '', 'light', true), [])
+
+// ---- collection management (LPSwatch)
+// A removed background takes its clip slot with it, so later pairs do not slide.
+const cut = Model.withoutBackground([V, ...T], 'gruvbox', '/b/1.jpg')
+assert.deepEqual(cut[0].backgrounds, ['/b/2.jpg', '/b/3.jpg'])
+assert.deepEqual(cut[0].bgKeys, ['2222222222222222', '3333333333333333'])
+assert.deepEqual(cut[0].bgVideoKeys, ['2222222222222222', ''])
+assert.equal(Model.hasVideo(cut[0], 0), true)
+assert.equal(V.backgrounds.length, 3)                       // the index record is untouched
+assert.equal(cut[1], T[0])                                  // other themes are the same objects
+assert.equal(Model.withoutBackground([V], 'gruvbox', '/b/none.jpg')[0], V)
+const cutPreview = Model.withoutBackground([{...V, preview: '/b/1.jpg', previewKey: 'old'}], 'gruvbox', '/b/1.jpg')[0]
+assert.equal(cutPreview.previewKey, '2222222222222222')
+assert.deepEqual(Model.withoutTheme([V, ...T], 'gruvbox'), T)
+assert.equal(Model.withoutTheme(T, 'nope').length, T.length)
+
+// Hidden themes leave the strip, except the one on the desktop.
+const names = list => list.map(t => t.name)
+assert.equal(Model.visibleThemes(T, [], false, ''), T)
+assert.equal(names(Model.visibleThemes(T, [T[0].name, T[1].name], false, '')).includes(T[0].name), false)
+assert.equal(Model.visibleThemes(T, [T[0].name, T[1].name], false, '').length, T.length - 2)
+assert.equal(names(Model.visibleThemes(T, [T[0].name], false, T[0].name)).includes(T[0].name), true)
+assert.equal(Model.visibleThemes(T, [T[0].name], true, ''), T)
+
+// Ours to remove, or only to hide.
+assert.equal(Model.ownsBackground(V, '/b/1.jpg'), false)
+assert.equal(Model.ownsBackground(V, '/home/u/.config/omarchy/backgrounds/gruvbox/1.jpg'), true)
+assert.equal(Model.ownsBackground({...V, source: 'user'}, '/b/1.jpg'), true)
+assert.equal(Model.ownsBackground(null, '/b/1.jpg'), false)
+
+assert.equal(Model.formatBytes(0), '0 B')
+assert.equal(Model.formatBytes(900), '900 B')
+assert.equal(Model.formatBytes(1536), '1.5 KB')
+assert.equal(Model.formatBytes(140 * 1024 * 1024), '140 MB')
+assert.equal(Model.formatBytes(3.2 * 1024 * 1024 * 1024), '3.2 GB')

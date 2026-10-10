@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "id": "jmckible.swatch",
-  "name": "Swatch",
-  "version": "0.4.0",
-  "author": "Jordan McKible",
+  "id": "lpickard.lpswatch",
+  "name": "LPSwatch",
+  "version": "0.5.0",
+  "author": "Leo Pickard (fork of Swatch by Jordan McKible)",
   "license": "MIT",
-  "homepage": "https://github.com/jmckible/omarchy-swatch",
-  "description": "Theme picker that tries the theme on: full-screen wallpaper and live shell retint as you scrub, instant open at any collection size",
+  "homepage": "https://github.com/L-Pickard/LPSwatch",
+  "description": "Swatch, plus collection management: delete and hide themes, remove backgrounds, undo, and empty the trash, all from the full-screen picker",
   "kinds": [
     "overlay"
   ],

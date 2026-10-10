@@ -4,6 +4,8 @@ A fork of [Swatch](https://github.com/jmckible/omarchy-swatch) by Jordan McKible
 
 | Action | Button | Key |
 |---|---|---|
+| Install a theme from a pasted git URL, without applying it | Add theme | `A` |
+| Open the Extra Themes plugin to find themes | Browse | `E` |
 | Delete the selected theme (stock themes are hidden instead) | Delete theme / Hide theme | `Shift+Delete` |
 | Remove the selected background (stock backgrounds are hidden instead) | Remove / Hide | `Delete` |
 | Add pictures to the selected theme's backgrounds | Add | `B` |
@@ -11,7 +13,7 @@ A fork of [Swatch](https://github.com/jmckible/omarchy-swatch) by Jordan McKible
 | Permanently delete what LPSwatch trashed | Empty trash | `Ctrl+Shift+Delete`, then `Enter` |
 | Show hidden themes and backgrounds | | `Ctrl+H` |
 
-Deleted themes and backgrounds go to your normal system trash, so they can also be restored from the file manager. The theme and background currently on your desktop can't be removed. Added pictures are copies; the originals are never moved or changed. Still to come: adding themes and a full-screen browse of `~/Pictures` (see `SPEC.md`).
+Deleted themes and backgrounds go to your normal system trash, so they can also be restored from the file manager. The theme and background currently on your desktop can't be removed. Added pictures are copies; the originals are never moved or changed. Installing a theme is the only time LPSwatch uses the network. Still to come: a full-screen browse of `~/Pictures` (see `SPEC.md`).
 
 ---
 

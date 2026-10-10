@@ -52,6 +52,10 @@ Item {
   // window with the keyboard to itself — so the overlay steps aside while a
   // picture is being chosen and comes back exactly as it was.
   property bool choosing: false
+  // The box a theme's git URL is pasted into. It stays up while the theme
+  // downloads, with the keyboard handed back so browsing carries on.
+  property bool addingTheme: false
+  property string installError: ""
   readonly property color dangerColor: selected ? selected.colors.red || "#e5484d" : "#e5484d"
   readonly property bool themeHidden: !!selected && isThemeHidden(selected.name)
   readonly property bool themeOnDesktop: !!selected && selected.name === currentTheme
@@ -340,6 +344,8 @@ Item {
     hoverHint = ""
     pendingSelect = null
     choosing = false
+    addingTheme = false
+    installError = ""
     readPreferences()
     readCollection()
     opened = true
@@ -700,6 +706,80 @@ Item {
     })
   }
 
+  // install.py: the plugin's only use of the network. No lock is shared with
+  // manage.py, so removing and undoing keep working while a theme downloads.
+  Process {
+    id: installProc
+    property var done: null
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var done = installProc.done
+        installProc.done = null
+        var result = null
+        try { result = JSON.parse(text) } catch (e) { result = null }
+        if (done) done(result || {ok: false, error: "The installer did not answer; nothing was installed"})
+      }
+    }
+  }
+
+  function beginAddTheme() {
+    if (installProc.running) { curationMessage = "Still installing the last theme"; return }
+    installError = ""
+    addingTheme = true
+    Qt.callLater(function() { urlInput.forceActiveFocus(); urlInput.selectAll() })
+  }
+
+  function cancelAddTheme() {
+    if (installProc.running) return
+    addingTheme = false
+    installError = ""
+    keys.forceActiveFocus()
+  }
+
+  // Installed, selected for preview, and not applied: Enter is still the only
+  // thing that changes the desktop.
+  function installTheme(url) {
+    url = String(url || "").trim()
+    if (!url || installProc.running) return
+    installError = ""
+    installProc.done = function(result) {
+      if (!result.ok) {
+        root.installError = result.error || "Could not install that theme"
+        if (!root.opened) return
+        root.addingTheme = true
+        Qt.callLater(function() { urlInput.forceActiveFocus() })
+        return
+      }
+      root.addingTheme = false
+      urlInput.text = ""
+      root.pushUndo({type: "install", name: result.theme})
+      // A new theme is not a favourite yet; it has to be in the strip to land on.
+      if (root.favoritesOnly) { root.openingFavoritesSettled = true; root.favoritesOnly = false }
+      root.pendingSelect = {theme: result.theme, bg: ""}
+      root.loadedIndex = ""
+      root.changeSeq += 1
+      root.requestRefresh()
+      root.curationMessage = "Installed " + result.theme + " · Enter applies it · Ctrl+Z to undo"
+    }
+    installProc.command = ["python3", scriptPath("install.py"), "install", url]
+    installProc.running = true
+    keys.forceActiveFocus()
+  }
+
+  // The catalogue is the Extra Themes plugin's job; this only opens it. What is
+  // installed there is in the strip the next time the picker opens.
+  function browseThemes() {
+    if (installProc.running) { curationMessage = "Still installing the last theme"; return }
+    installProc.done = function(result) {
+      if (!result.ok) { root.curationMessage = result.error || "The Extra Themes plugin is not installed"; return }
+      root.dismiss()
+      Quickshell.execDetached(["omarchy-shell", "shell", "summon", result.plugin, "{}"])
+    }
+    installProc.command = ["python3", scriptPath("install.py"), "browser"]
+    installProc.running = true
+  }
+
   function undo() {
     if (!undoStack.length) { curationMessage = "Nothing to undo"; return }
     if (manageProc.running || preferencesProc.running || !preferencesReady) return
@@ -713,6 +793,16 @@ Item {
         root.undoStack = rest
         root.pendingSelect = {theme: entry.name, bg: ""}
         root.curationMessage = "Restored " + entry.name
+        root.recurate()
+      })
+    } else if (entry.type === "install") {
+      manage(["trash-theme", entry.name], function(result) {
+        if (result.ok || result.code === "missing") root.undoStack = rest
+        if (!result.ok) { root.curationMessage = result.error; return }
+        root.leaveSelected(entry.name)
+        root.entomb({theme: entry.name})
+        root.requestRefresh()
+        root.curationMessage = "Took back " + entry.name
         root.recurate()
       })
     } else if (entry.type === "add") {
@@ -1754,9 +1844,15 @@ Item {
           else if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_H) root.toggleShowHidden()
           else if (ctrl && k === Qt.Key_Z) root.undo()
           else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_B) root.addBackgrounds()
+          else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_A) root.beginAddTheme()
+          else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_E) root.browseThemes()
           else if (k === Qt.Key_Delete && !root.searching && shift) root.removeTheme()
           else if (k === Qt.Key_Delete && !root.searching) root.removeBackground()
-          else if (k === Qt.Key_Escape) { if (root.searching) root.endSearch(); else root.dismiss() }
+          else if (k === Qt.Key_Escape) {
+            if (root.searching) root.endSearch()
+            else if (root.addingTheme && !installProc.running) root.cancelAddTheme()
+            else root.dismiss()
+          }
           else if (!root.searching && event.modifiers === Qt.NoModifier && (k === Qt.Key_Space || k === Qt.Key_Slash)) root.beginSearch()
           else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_H) root.move(-1, true)
           else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_L) root.move(1, true)
@@ -2334,6 +2430,7 @@ Item {
       // Icons for the action buttons, as stroked paths on HiddenEye's 24 grid.
       readonly property var glyphs: ({
         plus: "M 12 5 V 19 M 5 12 H 19",
+        browse: "M 11 4 A 7 7 0 1 1 11 18 A 7 7 0 1 1 11 4 M 16 16 L 21 21",
         trash: "M 4 7 H 20 M 9 7 V 4 H 15 V 7 M 6 7 L 7 20 H 17 L 18 7 M 10 11 V 16 M 14 11 V 16",
         purge: "M 4 7 H 20 M 9 7 V 4 H 15 V 7 M 6 7 L 7 20 H 17 L 18 7 M 10 11 L 14 15 M 14 11 L 10 15",
         undo: "M 9 14 L 4 9 L 9 4 M 4 9 H 14 A 6 6 0 0 1 14 21 H 11",
@@ -2469,6 +2566,104 @@ Item {
           font.pixelSize: root.fz.caption
         }
         MouseArea { anchors.fill: parent; onClicked: root.beginSearch() }
+      }
+
+      // Add a theme: a real text field, because a URL is pasted, not typed. It
+      // holds the keyboard only while it is being edited.
+      Rectangle {
+        id: urlBox
+        visible: root.addingTheme
+        width: Math.min(root.sp(620), parent.width - root.sp(112))
+        height: urlColumn.implicitHeight + root.sp(24)
+        opacity: root.chromeOpacity
+        anchors { horizontalCenter: parent.horizontalCenter; top: searchField.bottom; topMargin: root.sp(10) }
+        radius: root.sp(3)
+        color: Util.alpha(root.bg, 0.94)
+        border.width: 1
+        border.color: root.installError ? root.dangerColor : urlInput.activeFocus ? Util.alpha(root.accent, 0.8) : Util.alpha(root.fg, 0.2)
+        // Also keeps a click here from reaching the stage, which dismisses.
+        MouseArea { anchors.fill: parent; onClicked: if (!installProc.running) urlInput.forceActiveFocus() }
+        Column {
+          id: urlColumn
+          anchors { left: parent.left; right: parent.right; top: parent.top; margins: root.sp(12) }
+          spacing: root.sp(8)
+          Text {
+            text: installProc.running ? "Installing theme…" : "Add a theme · paste its git URL"
+            color: root.fg
+            opacity: 0.75
+            font.family: Style.fontFamily
+            font.pixelSize: root.fz.caption
+            font.weight: Font.DemiBold
+          }
+          Item {
+            width: parent.width
+            height: urlInput.implicitHeight
+            TextInput {
+              id: urlInput
+              anchors.fill: parent
+              clip: true
+              readOnly: installProc.running
+              maximumLength: 512
+              selectByMouse: true
+              color: root.fg
+              selectionColor: root.accent
+              selectedTextColor: root.bg
+              font.family: Style.fontFamily
+              font.pixelSize: root.fz.body
+              onAccepted: root.installTheme(text)
+              onTextEdited: root.installError = ""
+              Keys.onEscapePressed: root.cancelAddTheme()
+            }
+            Text {
+              visible: urlInput.text === ""
+              text: "https://github.com/someone/omarchy-example-theme"
+              color: root.fg
+              opacity: 0.35
+              font.family: Style.fontFamily
+              font.pixelSize: root.fz.body
+            }
+          }
+          // Indeterminate: git reports nothing useful for a clone this small.
+          Rectangle {
+            width: parent.width
+            height: root.sp(2)
+            color: Util.alpha(root.fg, 0.14)
+            clip: true
+            Rectangle {
+              id: installBar
+              visible: installProc.running
+              width: parent.width * 0.28
+              height: parent.height
+              color: root.accent
+              NumberAnimation on x {
+                running: installProc.running && root.opened
+                loops: Animation.Infinite
+                from: -installBar.width; to: urlColumn.width
+                duration: 1100
+                easing.type: Easing.InOutQuad
+              }
+            }
+          }
+          Text {
+            visible: root.installError !== ""
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: root.installError
+            textFormat: Text.PlainText
+            color: root.dangerColor
+            font.family: Style.fontFamily
+            font.pixelSize: root.fz.caption
+          }
+          Text {
+            text: installProc.running ? "You can keep browsing while it downloads"
+                : urlInput.activeFocus ? "Enter installs it, without applying · Ctrl+V pastes · Esc cancels"
+                                       : "Click here or press A to edit · Esc closes"
+            color: root.fg
+            opacity: 0.5
+            font.family: Style.fontFamily
+            font.pixelSize: root.fz.caption
+          }
+        }
       }
 
       // Errors and constraints surface briefly; ordinary curation is visual.
@@ -2894,6 +3089,19 @@ Item {
         enabled: !root.applying
         anchors { left: themeCount.right; bottom: parent.bottom; leftMargin: root.sp(28); bottomMargin: root.sp(8) }
         spacing: root.sp(8)
+        ActionButton {
+          label: installProc.running && root.addingTheme ? "Installing…" : "Add theme"
+          glyph: stage.glyphs.plus
+          armed: root.addingTheme
+          hint: "Install a theme from its git URL, without applying it · A"
+          onActivated: root.beginAddTheme()
+        }
+        ActionButton {
+          label: "Browse"
+          glyph: stage.glyphs.browse
+          hint: "Find themes in the Extra Themes plugin (closes this picker) · E"
+          onActivated: root.browseThemes()
+        }
         ActionButton {
           label: root.themeHidden ? "Restore theme" : root.selected && root.selected.source === "user" ? "Delete theme" : "Hide theme"
           glyph: root.themeHidden ? stage.glyphs.show : root.selected && root.selected.source === "user" ? stage.glyphs.trash : stage.glyphs.hide

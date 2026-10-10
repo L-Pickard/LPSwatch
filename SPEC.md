@@ -2,7 +2,7 @@
 
 Status: APPROVED by Leo on 2026-10-10.
 
-Progress: slice 1 built (B3, B4, B5, B8, B9, B10, B11 for deletes and hides, B14, and the B13 buttons for those). Automated tests pass; on-screen checks and Leo's sign-off on the look are still to do. Not started: B1, B2, B6, B7, B12.
+Progress: slices 1 and 2 built (everything except B1, B2 and B7). Automated tests pass; on-screen checks and Leo's sign-off on the look are still to do. Slice 1 is committed and pushed; slice 2 (B6, B12, undo of an add) is on the `add-backgrounds` branch, uncommitted.
 Quick spec: Obsidian `Specs/Swatch plugin fork.md`. Upstream: `jmckible/omarchy-swatch` at `52bfa98`.
 
 ## Goal
@@ -120,6 +120,9 @@ None.
 | 2026-10-10 | LPSwatch keeps its own cache and saved-choices folders (`omarchy/lpswatch`) | So it never fights upstream Swatch if both are installed. There were no saved favourites to carry over |
 | 2026-10-10 | Empty trash shortcut is `Ctrl+Shift+Delete`, and asks twice (second press or Enter within 6 seconds) | The spec named no key; it is the one permanent action |
 | 2026-10-10 | A background that is on the desktop right now can't be removed | Same reasoning as B5 for themes |
+| 2026-10-10 | The picker steps aside while the file chooser is open, then returns as it was | The chooser is an ordinary window and the picker covers every window |
+| 2026-10-10 | Added pictures are renamed to safe characters and to the extension their contents call for | A PNG saved as `.jpg` would otherwise be mislabelled; odd characters in names are untrusted input everywhere else in the plugin |
+| 2026-10-10 | Undoing an add sends the copies to the trash, not straight to deletion | Keeps the one rule that nothing but Empty trash deletes |
 | 2026-10-10 | A newly installed theme is previewed, not applied | Keeps Enter as the only thing that changes the desktop |
 | 2026-10-10 | Keys: `a` add theme, `e` Extra Themes, `b` add backgrounds, `p` Pictures, `Delete` remove background, `Shift+Delete` delete theme, `Ctrl+Z` undo | Approved as proposed |
 | 2026-10-10 | Backgrounds shipped inside a user-installed theme are trashed like any other | Otherwise most backgrounds could only be hidden. Accepted cost: that theme's `git pull` fails if its author later changes the same file |

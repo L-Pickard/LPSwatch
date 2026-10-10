@@ -48,6 +48,10 @@ Item {
   property bool confirmEmpty: false
   Timer { id: confirmLapse; interval: 6000; onTriggered: root.confirmEmpty = false }
   property string hoverHint: ""
+  // The file dialog is an ordinary window, and this overlay sits above every
+  // window with the keyboard to itself — so the overlay steps aside while a
+  // picture is being chosen and comes back exactly as it was.
+  property bool choosing: false
   readonly property color dangerColor: selected ? selected.colors.red || "#e5484d" : "#e5484d"
   readonly property bool themeHidden: !!selected && isThemeHidden(selected.name)
   readonly property bool themeOnDesktop: !!selected && selected.name === currentTheme
@@ -335,6 +339,7 @@ Item {
     confirmEmpty = false
     hoverHint = ""
     pendingSelect = null
+    choosing = false
     readPreferences()
     readCollection()
     opened = true
@@ -353,6 +358,8 @@ Item {
   }
 
   function close() {
+    if (chooseProc.running) chooseProc.running = false
+    choosing = false
     resetCollectionTransition()
     if (!applying && livePreview) revertPreview()
     if (pickDir && !applying) finishPick("")
@@ -653,6 +660,46 @@ Item {
     })
   }
 
+  Process {
+    id: chooseProc
+    property string theme: ""
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.chosen(chooseProc.theme, text) }
+    onExited: function(exitCode, exitStatus) {
+      root.choosing = false
+      if (exitCode !== 0 && root.opened) root.curationMessage = "Could not open the file chooser"
+    }
+  }
+
+  // Pictures are copied into the theme's own user folder, so this works for a
+  // stock theme too and never touches the original.
+  function addBackgrounds() {
+    if (!selected || choosing) return
+    if (manageProc.running) { curationMessage = "Still working on the last change"; return }
+    chooseProc.theme = selected.name
+    chooseProc.command = ["python3", scriptPath("choose.py"), home + "/Pictures", "Add backgrounds to " + selected.name]
+    choosing = true
+    chooseProc.running = true
+  }
+
+  function chosen(theme, text) {
+    choosing = false
+    Qt.callLater(function() { keys.forceActiveFocus() })
+    var paths = []
+    try { paths = JSON.parse(text) } catch (e) { paths = [] }
+    if (!Array.isArray(paths) || !paths.length || !opened) return
+    manage(["add-bg", theme].concat(paths), function(result) {
+      if (!result.ok) { root.curationMessage = result.error; return }
+      var n = result.added.length, skipped = result.skipped || []
+      root.pushUndo({type: "add", theme: theme, files: result.added.map(function(path) { return Model.baseName(path) })})
+      root.pendingSelect = {theme: theme, bg: result.added[0]}
+      root.loadedIndex = ""
+      root.changeSeq += 1
+      root.requestRefresh()
+      root.curationMessage = "Added " + n + (n === 1 ? " background" : " backgrounds")
+        + (skipped.length ? " · skipped " + skipped.length + " (" + skipped[0].error + ")" : "") + " · Ctrl+Z to undo"
+    })
+  }
+
   function undo() {
     if (!undoStack.length) { curationMessage = "Nothing to undo"; return }
     if (manageProc.running || preferencesProc.running || !preferencesReady) return
@@ -667,6 +714,17 @@ Item {
         root.pendingSelect = {theme: entry.name, bg: ""}
         root.curationMessage = "Restored " + entry.name
         root.recurate()
+      })
+    } else if (entry.type === "add") {
+      manage(["discard-bg", entry.theme].concat(entry.files), function(result) {
+        if (result.ok || result.code === "missing") root.undoStack = rest
+        if (!result.ok) { root.curationMessage = result.error; return }
+        for (var i = 0; i < result.removed.length; i++) root.entomb({theme: entry.theme, bg: result.removed[i]})
+        root.curatedThemes = Model.curate(root.collection(), root.preferences, false, root.showHidden)
+        root.scrubQuick = true
+        root.rebuild(false)
+        root.requestRefresh()
+        root.curationMessage = "Took back " + result.removed.length + (result.removed.length === 1 ? " added background" : " added backgrounds")
       })
     } else {
       manage(["restore", entry.id], function(result) {
@@ -1389,7 +1447,7 @@ Item {
 
   PanelWindow {
     id: panel
-    visible: root.opened
+    visible: root.opened && !root.choosing
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     WlrLayershell.namespace: "swatch"
@@ -1695,6 +1753,7 @@ Item {
           else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_F) root.toggleFavorite()
           else if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_H) root.toggleShowHidden()
           else if (ctrl && k === Qt.Key_Z) root.undo()
+          else if (!root.searching && event.modifiers === Qt.NoModifier && k === Qt.Key_B) root.addBackgrounds()
           else if (k === Qt.Key_Delete && !root.searching && shift) root.removeTheme()
           else if (k === Qt.Key_Delete && !root.searching) root.removeBackground()
           else if (k === Qt.Key_Escape) { if (root.searching) root.endSearch(); else root.dismiss() }
@@ -1808,7 +1867,9 @@ Item {
         // the border does the marking. Only when there is something to choose.
         Item {
           id: bgArea
-          visible: !!root.selected && (root.selected.backgrounds.length > 1 || root.selectedHiddenCount > 0)
+          // Upstream showed this only when there was something to choose between;
+          // here it is also where a background gets added, so it is always there.
+          visible: !!root.selected
           width: root.bgThumbW + root.sp(120)
           height: root.bgStripH
           readonly property real selectedCenter: root.bgThumbH / 2
@@ -1969,18 +2030,30 @@ Item {
             anchors { left: bgStrip.right; leftMargin: root.sp(14) }
             y: Math.round(bgArea.selectedCenter - height / 2)
             spacing: root.sp(4)
-            Text { text: root.selected ? (root.bgIndex + 1) + " / " + root.selected.backgrounds.length : ""; color: root.fg; font.family: Style.fontFamily; font.pixelSize: root.fz.title; font.weight: Font.DemiBold }
+            Text { text: !root.selected ? "" : root.selected.backgrounds.length ? (root.bgIndex + 1) + " / " + root.selected.backgrounds.length : "none"; color: root.fg; font.family: Style.fontFamily; font.pixelSize: root.fz.title; font.weight: Font.DemiBold }
             Text { text: "backgrounds"; color: root.fg; opacity: 0.7; font.family: Style.fontFamily; font.pixelSize: root.fz.caption }
-            Text { text: "↑ ↓"; color: root.fg; opacity: 0.5; font.family: Style.fontFamily; font.pixelSize: root.fz.caption }
+            Text { text: "↑ ↓"; visible: !!root.selected && root.selected.backgrounds.length > 1; color: root.fg; opacity: 0.5; font.family: Style.fontFamily; font.pixelSize: root.fz.caption }
           }
 
           // Declared after the wheel catcher's siblings so it takes its own clicks.
+          // Stacked on one lean: the upper button sits right of the lower by the
+          // shear between them, so their left edges make a single slanted line.
+          ActionButton {
+            id: bgAdd
+            z: 1
+            anchors { left: bgStrip.right; leftMargin: root.sp(6) + Math.round((height + root.sp(6)) * root.rake) }
+            y: Math.round(bgArea.selectedCenter + root.bgThumbH / 2 + root.sp(10))
+            label: "Add"
+            glyph: stage.glyphs.plus
+            hint: "Add pictures to this theme's backgrounds · B"
+            onActivated: root.addBackgrounds()
+          }
           ActionButton {
             id: bgRemove
             z: 1
             readonly property bool owned: Model.ownsBackground(root.selected, root.selectedBackground)
             anchors { left: bgStrip.right; leftMargin: root.sp(6) }
-            y: Math.round(bgArea.selectedCenter + root.bgThumbH / 2 + root.sp(10))
+            y: bgAdd.y + bgAdd.height + root.sp(6)
             visible: !!root.selected && root.selected.backgrounds.length > 0
             label: root.backgroundHidden ? "Restore" : owned ? "Remove" : "Hide"
             glyph: root.backgroundHidden ? stage.glyphs.show : owned ? stage.glyphs.trash : stage.glyphs.hide
@@ -2260,6 +2333,7 @@ Item {
 
       // Icons for the action buttons, as stroked paths on HiddenEye's 24 grid.
       readonly property var glyphs: ({
+        plus: "M 12 5 V 19 M 5 12 H 19",
         trash: "M 4 7 H 20 M 9 7 V 4 H 15 V 7 M 6 7 L 7 20 H 17 L 18 7 M 10 11 V 16 M 14 11 V 16",
         purge: "M 4 7 H 20 M 9 7 V 4 H 15 V 7 M 6 7 L 7 20 H 17 L 18 7 M 10 11 L 14 15 M 14 11 L 10 15",
         undo: "M 9 14 L 4 9 L 9 4 M 4 9 H 14 A 6 6 0 0 1 14 21 H 11",

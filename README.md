@@ -6,11 +6,12 @@ A fork of [Swatch](https://github.com/jmckible/omarchy-swatch) by Jordan McKible
 |---|---|---|
 | Delete the selected theme (stock themes are hidden instead) | Delete theme / Hide theme | `Shift+Delete` |
 | Remove the selected background (stock backgrounds are hidden instead) | Remove / Hide | `Delete` |
+| Add pictures to the selected theme's backgrounds | Add | `B` |
 | Undo the last change, repeatedly | Undo | `Ctrl+Z` |
 | Permanently delete what LPSwatch trashed | Empty trash | `Ctrl+Shift+Delete`, then `Enter` |
 | Show hidden themes and backgrounds | | `Ctrl+H` |
 
-Deleted themes and backgrounds go to your normal system trash, so they can also be restored from the file manager. The theme and background currently on your desktop can't be removed. Still to come: adding themes and backgrounds from the picker (see `SPEC.md`).
+Deleted themes and backgrounds go to your normal system trash, so they can also be restored from the file manager. The theme and background currently on your desktop can't be removed. Added pictures are copies; the originals are never moved or changed. Still to come: adding themes and a full-screen browse of `~/Pictures` (see `SPEC.md`).
 
 ---
 

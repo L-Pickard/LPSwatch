@@ -7,7 +7,19 @@ import subprocess
 import tempfile
 import unittest
 
+import struct
+import zlib
+
 SCRIPT = Path(__file__).resolve().parent.parent / "manage.py"
+
+
+def png(width=4, height=4, rows=None):
+    """A real PNG. `rows` below `height` makes a header that claims more than it holds."""
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+    raw = b"".join(b"\x00" + b"\x40\x80\xc0" * width for _ in range(height if rows is None else rows))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 
 class ManageTest(unittest.TestCase):
@@ -200,6 +212,76 @@ class ManageTest(unittest.TestCase):
         self.refused("active", "remove-theme", "beta")
         self.refused("missing", "remove-theme", "nope")
         self.refused("name", "remove-theme", "../alpha")
+
+    def test_add_backgrounds_copies_and_never_overwrites(self):
+        pictures = self.home / "Pictures"
+        pictures.mkdir()
+        (pictures / "My Holiday (1).PNG").write_bytes(png())
+        (pictures / "wrongly-named.jpg").write_bytes(png(8, 8))
+        source = str(pictures / "My Holiday (1).PNG")
+        first = self.run_helper("add-bg", "alpha", source, str(pictures / "wrongly-named.jpg"))
+        self.assertTrue(first["ok"])
+        # Named from what the bytes are, in characters that are safe everywhere.
+        self.assertEqual([Path(p).name for p in first["added"]], ["My-Holiday-1.png", "wrongly-named.png"])
+        self.assertEqual(first["skipped"], [])
+        again = self.run_helper("add-bg", "alpha", source)
+        self.assertEqual([Path(p).name for p in again["added"]], ["My-Holiday-1-2.png"])
+        folder = self.bgs / "alpha"
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ["My-Holiday-1-2.png", "My-Holiday-1.png", "wrongly-named.png"])
+        self.assertEqual((folder / "My-Holiday-1.png").read_bytes(), png())
+        self.assertEqual((pictures / "My Holiday (1).PNG").read_bytes(), png())     # the original is untouched
+        # Stock themes take added backgrounds too; nothing is written under the stock folder.
+        stock = self.run_helper("add-bg", "tokyo", source)
+        self.assertEqual(stock["added"], [str(self.bgs / "tokyo/My-Holiday-1.png")])
+        self.assertEqual(sorted(p.name for p in (self.stock / "tokyo/backgrounds").iterdir()), ["t1.jpg", "t2.jpg"])
+
+    def test_add_backgrounds_refuses_what_is_not_a_picture(self):
+        pictures = self.home / "Pictures"
+        pictures.mkdir()
+        (pictures / "good.png").write_bytes(png())
+        (pictures / "notes.jpg").write_text("just text")
+        (pictures / "script.png").write_text("#!/bin/sh\nrm -rf ~\n")
+        (pictures / "svg.png").write_text("<svg xmlns='http://www.w3.org/2000/svg'/>")
+        (pictures / "empty.png").write_bytes(b"")
+        (pictures / "huge.png").write_bytes(png(10000, 6000, rows=1))             # 60 megapixels claimed
+        (pictures / "cut.png").write_bytes(png()[:20])
+        os.mkfifo(pictures / "pipe.png")
+        before = self.tree()
+        for bad in ("notes.jpg", "script.png", "svg.png", "empty.png", "huge.png", "cut.png", "pipe.png", "absent.png"):
+            self.refused("image", "add-bg", "alpha", str(pictures / bad))
+        self.refused("image", "add-bg", "alpha", "relative.png")
+        self.refused("missing", "add-bg", "nope", str(pictures / "good.png"))
+        self.refused("name", "add-bg", "../alpha", str(pictures / "good.png"))
+        self.assertEqual([p for p in self.tree() if p != ".config/omarchy/backgrounds/alpha"], before)
+        self.assertEqual(list((self.bgs / "alpha").iterdir()), [])                 # no temp files left behind
+        # A linked background folder is someone else's; nothing is written through it.
+        outside = self.home / "elsewhere"
+        outside.mkdir()
+        os.symlink(outside, self.bgs / "beta")
+        self.refused("linked", "add-bg", "beta", str(pictures / "good.png"))
+        self.assertEqual(list(outside.iterdir()), [])
+        # Good and bad together: the good ones land, the bad ones are named.
+        mixed = self.run_helper("add-bg", "alpha", str(pictures / "notes.jpg"), str(pictures / "good.png"))
+        self.assertEqual([Path(p).name for p in mixed["added"]], ["good.png"])
+        self.assertEqual([item["name"] for item in mixed["skipped"]], ["notes.jpg"])
+
+    def test_discard_takes_back_added_backgrounds(self):
+        pictures = self.home / "Pictures"
+        pictures.mkdir()
+        (pictures / "one.png").write_bytes(png())
+        (pictures / "two.png").write_bytes(png(8, 8))
+        self.theme("bare", [])
+        added = self.run_helper("add-bg", "bare", str(pictures / "one.png"), str(pictures / "two.png"))
+        names = [Path(p).name for p in added["added"]]
+        # Taking back every added picture is allowed even though it leaves the theme with none.
+        result = self.run_helper("discard-bg", "bare", *names)
+        self.assertEqual(result["removed"], added["added"])
+        self.assertEqual(list((self.bgs / "bare").iterdir()), [])
+        self.assertEqual(result["trashCount"], 2)
+        self.assertTrue((pictures / "one.png").exists())
+        self.refused("missing", "discard-bg", "bare", *names)
+        self.refused("missing", "discard-bg", "bare", "../../themes/alpha/backgrounds/a.jpg")
+        self.assertTrue((self.themes / "alpha/backgrounds/a.jpg").exists())
 
     def test_corrupt_state_is_refused_and_left_alone(self):
         self.state.parent.mkdir(parents=True)

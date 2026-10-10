@@ -8,6 +8,8 @@ shell string.
   manage.py trash-theme <theme>
   manage.py trash-bg <theme> <extra|theme> <filename>
   manage.py hide-theme <theme> <true|false>
+  manage.py add-bg <theme> <image>...       copy images in; never overwrites
+  manage.py discard-bg <theme> <filename>...  undo of add-bg: trash the copies
   manage.py restore <id>
   manage.py empty
 
@@ -16,8 +18,11 @@ freedesktop trash (the one the file manager shows), recorded in our journal so
 it can be put back, and so that `empty` -- the one permanent action -- can take
 out exactly what this plugin put in and leave the rest of the trash alone.
 
-Every path is built here from $HOME and a validated name; none is taken from
-argv. Only two places are ever touched: ~/.config/omarchy/themes/<theme> and
+Every path that is written or removed is built here from $HOME and a validated
+name; none is taken from argv. The one path argv does supply is the picture the
+user chose to add, which is only ever read: once, through one descriptor, into
+a copy that is checked as an image before it is given a name. Only two places
+are ever touched: ~/.config/omarchy/themes/<theme> and
 ~/.config/omarchy/backgrounds/<theme>. A refusal is an answer, not a failure:
 exit 0 with {"ok": false, "code": ..., "error": ...}. Exit 1 means the state on
 disk could not be trusted and nothing was changed.
@@ -31,6 +36,7 @@ import secrets
 import shutil
 import signal
 import stat
+import subprocess
 import sys
 import time
 from urllib.parse import quote, unquote
@@ -39,6 +45,12 @@ CAP = 262144
 MAX_TRASHED = 2000
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 IMAGES = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+# The same ceilings lib.sh holds a theme's own backgrounds to.
+MAX_IMAGE_BYTES = 67108864
+MAX_PIXELS = 50000000
+MAX_BACKGROUNDS = 200
+MAX_ADDED = 50
+LOADERS = {"jpegload": ".jpg", "pngload": ".png", "webpload": ".webp", "gifload": ".gif"}
 
 HOME = Path.home()
 THEMES = HOME / ".config/omarchy/themes"
@@ -290,7 +302,7 @@ def trash_theme(data, name):
     return {"id": entry["id"], "theme": name, "stockRemains": stock}
 
 
-def trash_background(data, name, kind, filename):
+def trash_background(data, name, kind, filename, keep_one=True):
     if not valid_name(name):
         raise Refused("name", "Not a theme name")
     if kind not in ("extra", "theme") or not valid_filename(filename) or not filename.lower().endswith(IMAGES):
@@ -316,7 +328,7 @@ def trash_background(data, name, kind, filename):
     if os.path.realpath(CURRENT / "background") == str(path):
         raise Refused("active", "That background is on your desktop. Apply another one first")
     shipped = theme_dir / "backgrounds" if real_dir(theme_dir) else STOCK / name / "backgrounds"
-    if images_in(BACKGROUNDS / name) + images_in(shipped) <= 1:
+    if keep_one and images_in(BACKGROUNDS / name) + images_in(shipped) <= 1:
         raise Refused("last", "Keep one background for this theme")
     if len(data["trash"]) >= MAX_TRASHED:
         raise Refused("full", "Empty the trash first")
@@ -324,6 +336,134 @@ def trash_background(data, name, kind, filename):
     entry = {"id": secrets.token_hex(8), "kind": "bg", "theme": name, "bytes": info.st_blocks * 512, "parts": [part]}
     data["trash"].append(entry)
     return {"id": entry["id"], "theme": name, "path": str(path)}
+
+
+def sniff(head):
+    """The extension the bytes themselves claim, whatever the file is called."""
+    if head.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def vips_field(path, field):
+    result = subprocess.run(["vipsheader", "-f", field, str(path)], capture_output=True, timeout=10)
+    return result.stdout.decode(errors="replace").strip() if result.returncode == 0 else None
+
+
+def check_image(path, extension):
+    """Decodable as the type it claims, within the pixel ceiling. vips is the
+    decoder thumbs.sh will hand it to, so this is the same judgement, early."""
+    try:
+        loader = vips_field(path, "vips-loader")
+        width, height = vips_field(path, "width"), vips_field(path, "height")
+    except FileNotFoundError:
+        return      # no vips: thumbs.sh could not show it either; the sniff stands
+    except subprocess.TimeoutExpired:
+        raise Refused("image", "That picture took too long to read")
+    if loader is None or LOADERS.get(loader) != extension or not (width or "").isdigit() or not (height or "").isdigit():
+        raise Refused("image", "That file is not a readable JPEG, PNG, WebP or GIF")
+    if int(width) * int(height) > MAX_PIXELS:
+        raise Refused("image", "That picture is too large (over 50 megapixels)")
+
+
+def clean_stem(source):
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(source).stem).strip("-._")[:80]
+    return stem or "background"
+
+
+def copy_in(folder, directory, source):
+    if not isinstance(source, str) or not source.startswith("/") or "\x00" in source:
+        raise Refused("image", "Not a file")
+    try:
+        fd = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        raise Refused("image", "Could not open that file")
+    temporary = ".adding-" + secrets.token_hex(16)
+    try:
+        with os.fdopen(fd, "rb") as reader:
+            info = os.fstat(reader.fileno())
+            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_IMAGE_BYTES:
+                raise Refused("image", "That is not a picture under 64 MB")
+            head = reader.read(16)
+            extension = sniff(head)
+            if extension is None:
+                raise Refused("image", "That file is not a JPEG, PNG, WebP or GIF")
+            out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=directory)
+            with os.fdopen(out, "wb") as writer:
+                copied, chunk = 0, head
+                while chunk:
+                    copied += len(chunk)
+                    # A file that grows mid-copy is refused, not kept as a prefix.
+                    if copied > MAX_IMAGE_BYTES:
+                        raise Refused("image", "That is not a picture under 64 MB")
+                    writer.write(chunk)
+                    chunk = reader.read(1 << 20)
+        check_image(folder / temporary, extension)
+        stem = clean_stem(source)
+        for attempt in range(1, 1000):
+            name = stem + ("" if attempt == 1 else "-%d" % attempt) + extension
+            # A hard link fails if the name is taken: nothing is ever overwritten.
+            try:
+                os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+            except FileExistsError:
+                continue
+            return str(folder / name)
+        raise Refused("full", "Too many backgrounds share that name")
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+
+
+def add_backgrounds(data, name, *sources):
+    if not valid_name(name):
+        raise Refused("name", "Not a theme name")
+    if not os.path.isdir(THEMES / name) and not real_dir(STOCK / name):
+        raise Refused("missing", "Theme not found")
+    if len(sources) > MAX_ADDED:
+        raise Refused("full", "Add at most %d pictures at a time" % MAX_ADDED)
+    folder = BACKGROUNDS / name
+    BACKGROUNDS.mkdir(parents=True, exist_ok=True)
+    if os.path.lexists(folder) and not real_dir(folder):
+        raise Refused("linked", "This theme's background folder is a link; add pictures to it yourself")
+    folder.mkdir(exist_ok=True)
+    directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    added, skipped = [], []
+    try:
+        room = MAX_BACKGROUNDS - images_in(folder)
+        for source in sources:
+            try:
+                if len(added) >= room:
+                    raise Refused("full", "This theme already has %d backgrounds" % MAX_BACKGROUNDS)
+                added.append(copy_in(folder, directory, source))
+            except Refused as refusal:
+                skipped.append({"name": os.path.basename(str(source))[:120], "error": str(refusal)})
+    finally:
+        os.close(directory)
+    if not added:
+        raise Refused("image", skipped[0]["error"] if skipped else "Nothing to add")
+    return {"theme": name, "added": added, "skipped": skipped}
+
+
+def discard_backgrounds(data, name, *filenames):
+    """Undo of an add: the copies go to the trash like any other removal. The
+    keep-one rule does not apply — these are being taken back, not chosen."""
+    removed, skipped = [], []
+    for filename in filenames[:MAX_ADDED]:
+        try:
+            removed.append(trash_background(data, name, "extra", filename, keep_one=False)["path"])
+        except Refused as refusal:
+            skipped.append({"name": str(filename)[:120], "error": str(refusal)})
+    if not removed:
+        raise Refused("missing", skipped[0]["error"] if skipped else "Nothing to take back")
+    return {"theme": name, "removed": removed, "skipped": skipped}
 
 
 def hide_theme(data, name, value):
@@ -385,15 +525,17 @@ def summary(data):
             "trashBytes": sum(entry["bytes"] for entry in data["trash"])}
 
 
-ACTIONS = {"status": 0, "remove-theme": 1, "trash-theme": 1, "trash-bg": 3, "hide-theme": 2, "restore": 1, "empty": 0}
+# Argument counts; a negative number is a minimum.
+ACTIONS = {"status": 0, "remove-theme": 1, "trash-theme": 1, "trash-bg": 3, "hide-theme": 2, "restore": 1,
+           "empty": 0, "add-bg": -2, "discard-bg": -2}
 
 
 def main():
     action = sys.argv[1] if len(sys.argv) > 1 else "status"
     args = sys.argv[2:]
-    if action not in ACTIONS or len(args) != ACTIONS[action]:
+    if action not in ACTIONS or (len(args) != ACTIONS[action] if ACTIONS[action] >= 0 else len(args) < -ACTIONS[action]):
         raise ValueError("Unknown action")
-    signal.alarm(600 if action == "empty" else 30)
+    signal.alarm(600 if action in ("empty", "add-bg") else 30)
     # A read-only script descriptor serializes changes without a writable lock file.
     with open(__file__, "rb") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -411,6 +553,10 @@ def main():
                     result.update(trash_theme(data, *args))
                 elif action == "trash-bg":
                     result.update(trash_background(data, *args))
+                elif action == "add-bg":
+                    result.update(add_backgrounds(data, *args))
+                elif action == "discard-bg":
+                    result.update(discard_backgrounds(data, *args))
                 elif action == "hide-theme":
                     result.update(hide_theme(data, *args))
                 elif action == "restore":

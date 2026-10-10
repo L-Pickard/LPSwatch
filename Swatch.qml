@@ -579,6 +579,8 @@ Item {
   function manage(args, done) {
     if (manageProc.running) { curationMessage = "Still working on the last change"; return false }
     confirmEmpty = false
+    // Counted from the start: files move while manage.py runs, before it answers.
+    if (args[0] !== "status") changeSeq += 1
     manageProc.done = done || null
     manageProc.command = ["python3", scriptPath("manage.py")].concat(args)
     manageProc.running = true
@@ -1088,6 +1090,12 @@ Item {
 
   function loadIndex(raw, refresh) {
     if (!raw) return
+    // A refresh that was running while the collection changed is not merely
+    // out of date. index.sh takes each theme's signature twice, once walking
+    // and once resolving, and a file moved in between leaves the two unequal:
+    // that theme is then missing from the result altogether, and the strip
+    // would jump off it. So such a result is not used at all; ask again.
+    if (refresh && refreshSeq !== changeSeq) { requestRefresh(); return }
     var parsed
     try { parsed = JSON.parse(raw) } catch (e) { console.warn("swatch: index parse failed:", e); return }
     var changed = raw !== loadedIndex
@@ -3383,7 +3391,8 @@ Item {
         anchors { right: parent.right; bottom: parent.bottom; rightMargin: root.sp(56); bottomMargin: root.sp(14) }
         spacing: root.sp(18)
         Repeater {
-          model: ["h/l theme", "j/k background", "/ search", "Ctrl+F favorites", "⏎ apply", "Esc cancel"]
+          model: root.picturesMode ? ["h/l picture", "Tab folder", "/ search", "⏎ add to theme", "Esc done"]
+                                   : ["h/l theme", "j/k background", "/ search", "Ctrl+F favorites", "⏎ apply", "Esc cancel"]
           Text { required property string modelData; text: modelData; color: root.fg; opacity: 0.75; font.family: Style.fontFamily; font.pixelSize: root.fz.caption }
         }
       }

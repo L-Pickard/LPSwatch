@@ -2,7 +2,7 @@
 
 Status: APPROVED by Leo on 2026-10-10.
 
-Progress: every behaviour (B1 to B14) is built and its automated tests pass. Nothing has been checked on screen yet: the "Done means" table and Leo's sign-off on the look are still to do. Slices 1 to 3 are committed and pushed; slice 4 (B7, Pictures mode) is on the `pictures-browse` branch, uncommitted.
+Progress: every behaviour (B1 to B14) is built, committed and merged to `main`. Automated tests pass, and on 2026-10-10 Claude drove the real picker on Leo's desktop and checked B1, B3 to B5, B7 to B9, B11 and B13's layout against real themes, restoring everything afterwards. Not checked on screen: the confirming second press of Empty trash (B14; its file handling is unit-tested), a real add through the file chooser's Add button (B6; the chooser opening and the picker's return were checked), B2, and mouse clicks and hover hints on the buttons. Leo has not yet signed off on the look.
 Quick spec: Obsidian `Specs/Swatch plugin fork.md`. Upstream: `jmckible/omarchy-swatch` at `52bfa98`.
 
 ## Goal
@@ -132,6 +132,7 @@ None.
 | 2026-10-10 | Pictures mode looks 4 folders deep, at up to 2,000 pictures, and never follows links | Bounded like every other folder the plugin reads |
 | 2026-10-10 | A picture can be added once per visit to Pictures mode | Stops an accidental double Enter making two copies; the file chooser still allows deliberate duplicates |
 | 2026-10-10 | Folder narrowing is the `Tab` key | The spec named no key |
+| 2026-10-10 | An index refresh that overlapped a collection change is discarded and re-run | Found on screen: a full index takes about 2 seconds, and one that overlaps a delete can come back with that theme missing, which threw the selection to the first theme |
 | 2026-10-10 | A newly installed theme is previewed, not applied | Keeps Enter as the only thing that changes the desktop |
 | 2026-10-10 | Keys: `a` add theme, `e` Extra Themes, `b` add backgrounds, `p` Pictures, `Delete` remove background, `Shift+Delete` delete theme, `Ctrl+Z` undo | Approved as proposed |
 | 2026-10-10 | Backgrounds shipped inside a user-installed theme are trashed like any other | Otherwise most backgrounds could only be hidden. Accepted cost: that theme's `git pull` fails if its author later changes the same file |
